@@ -1,0 +1,34 @@
+// Copy this file to msal-config.js and fill in your values.
+// msal-config.js is in .gitignore — never commit the real values.
+//
+// Values to fill in:
+//   SPA_CLIENT_ID         — SPA app registration client ID (Entra admin → App registrations)
+//   TENANT_ID             — Your Entra tenant ID (= ENTRA_TENANT_ID in .env)
+//   AGENTCORE_APP_CLIENT_ID — Blueprint app reg client ID (= AGENTCORE_APP_CLIENT_ID in .env)
+//   AGENTCORE_ENDPOINT_URL  — EndpointArn from CFN stack outputs (aws-deploy.ps1 prints this)
+
+const msalConfig = {
+  auth: {
+    clientId: "SPA_CLIENT_ID",
+    authority: "https://login.microsoftonline.com/TENANT_ID",
+    redirectUri: window.location.origin,
+  },
+  cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false }
+};
+
+// The scope requests a token whose audience (aud) is the AgentCore app registration.
+// This is the same client ID as the Blueprint app reg (they share one app reg).
+// AgentCore's inbound identity authorizer validates this token before the agent sees it.
+const agentCoreScopes = ["api://AGENTCORE_APP_CLIENT_ID/access_as_user"];
+// The AgentCore HTTPS invoke URL - NOT the ARN.
+// Format: https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{URL-encoded-RuntimeArn}/invocations?qualifier={EndpointId}
+//
+// Build it from the CFN outputs:
+//   RuntimeArn  = arn:aws:bedrock-agentcore:eu-central-1:123456789012:runtime/agentid_core_XXXX-YYYY
+//   EndpointId  = default
+//
+// URL-encode the ARN (replace : with %3A and / with %2F), then:
+//   https://bedrock-agentcore.eu-central-1.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aeu-central-1%3A123456789012%3Aruntime%2Fagentid_core_XXXX-YYYY/invocations?qualifier=default
+//
+// The deploy script will print this URL — copy it from there.
+const agentCoreEndpoint = "AGENTCORE_INVOKE_URL";  // printed by aws-deploy.ps1 at end of deploy

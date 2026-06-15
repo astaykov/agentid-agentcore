@@ -1,0 +1,1262 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "claude",
+  "elements": [
+    {
+      "id": "title",
+      "type": "text",
+      "x": 20,
+      "y": 12,
+      "width": 1360,
+      "height": 40,
+      "text": "AgentCore + Entra Agent ID PoC \u2014 Architecture",
+      "fontSize": 22,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "entra_bg",
+      "type": "rectangle",
+      "x": 20,
+      "y": 68,
+      "width": 360,
+      "height": 720,
+      "strokeColor": "#0078D4",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "id": "entra_hdr",
+      "type": "text",
+      "x": 20,
+      "y": 73,
+      "width": 360,
+      "height": 28,
+      "text": "Microsoft Entra ID",
+      "fontSize": 15,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "spa_app_reg",
+      "type": "rectangle",
+      "x": 42,
+      "y": 112,
+      "width": 316,
+      "height": 76,
+      "strokeColor": "#5C2D91",
+      "backgroundColor": "#E8DAEF",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "spa_app_reg_lbl"
+        }
+      ]
+    },
+    {
+      "id": "spa_app_reg_lbl",
+      "type": "text",
+      "x": 42,
+      "y": 112,
+      "width": 316,
+      "height": 76,
+      "text": "SPA App Registration\n(Public Client)\nMSAL Browser \u2014 acquires inbound JWT",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "spa_app_reg"
+    },
+    {
+      "id": "blueprint",
+      "type": "rectangle",
+      "x": 42,
+      "y": 205,
+      "width": 316,
+      "height": 76,
+      "strokeColor": "#0078D4",
+      "backgroundColor": "#CFE4FA",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "blueprint_lbl"
+        }
+      ]
+    },
+    {
+      "id": "blueprint_lbl",
+      "type": "text",
+      "x": 42,
+      "y": 205,
+      "width": 316,
+      "height": 76,
+      "text": "Blueprint\n(Agents \u2192 Blueprints in Entra admin)\nhas client_id + client_secret \u2192 Stage 1 FMI",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "blueprint"
+    },
+    {
+      "id": "agent_id",
+      "type": "rectangle",
+      "x": 42,
+      "y": 298,
+      "width": 316,
+      "height": 76,
+      "strokeColor": "#5C2D91",
+      "backgroundColor": "#E8DAEF",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "agent_id_lbl"
+        }
+      ]
+    },
+    {
+      "id": "agent_id_lbl",
+      "type": "text",
+      "x": 42,
+      "y": 298,
+      "width": 316,
+      "height": 76,
+      "text": "Agent Identity\n(Child of Blueprint \u2014 NOT an App Reg)\nfmi_path target \u2192 Stage 2 OBO client",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "agent_id"
+    },
+    {
+      "id": "echo_app_reg",
+      "type": "rectangle",
+      "x": 42,
+      "y": 391,
+      "width": 316,
+      "height": 76,
+      "strokeColor": "#107C10",
+      "backgroundColor": "#DFF6DD",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "echo_app_reg_lbl"
+        }
+      ]
+    },
+    {
+      "id": "echo_app_reg_lbl",
+      "type": "text",
+      "x": 42,
+      "y": 391,
+      "width": 316,
+      "height": 76,
+      "text": "Echo API App Registration\n(Resource Server \u2014 exposes api:// scope)\naud for Echo downstream token TR",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "echo_app_reg"
+    },
+    {
+      "id": "mcp_app_reg",
+      "type": "rectangle",
+      "x": 42,
+      "y": 484,
+      "width": 316,
+      "height": 76,
+      "strokeColor": "#0078D4",
+      "backgroundColor": "#CFE4FA",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "mcp_app_reg_lbl"
+        }
+      ]
+    },
+    {
+      "id": "mcp_app_reg_lbl",
+      "type": "text",
+      "x": 42,
+      "y": 484,
+      "width": 316,
+      "height": 76,
+      "text": "M365 MCP Server App Registration\n(exposes MCP scope)\naud for MCP downstream token TR",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "mcp_app_reg"
+    },
+    {
+      "id": "token_ep",
+      "type": "rectangle",
+      "x": 42,
+      "y": 577,
+      "width": 316,
+      "height": 76,
+      "strokeColor": "#0078D4",
+      "backgroundColor": "#CFE4FA",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "token_ep_lbl"
+        }
+      ]
+    },
+    {
+      "id": "token_ep_lbl",
+      "type": "text",
+      "x": 42,
+      "y": 577,
+      "width": 316,
+      "height": 76,
+      "text": "Token Endpoint\n/oauth2/v2.0/token\nFMI grant (Stage 1)  +  jwt-bearer OBO (Stage 2)",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "token_ep"
+    },
+    {
+      "id": "inbound_note",
+      "type": "rectangle",
+      "x": 42,
+      "y": 670,
+      "width": 316,
+      "height": 76,
+      "strokeColor": "#5C2D91",
+      "backgroundColor": "#E8DAEF",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "inbound_note_lbl"
+        }
+      ]
+    },
+    {
+      "id": "inbound_note_lbl",
+      "type": "text",
+      "x": 42,
+      "y": 670,
+      "width": 316,
+      "height": 76,
+      "text": "Inbound SPA Token\naud = Blueprint client_id\nForwarded as workloadaccesstoken",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "inbound_note"
+    },
+    {
+      "id": "spa_bg",
+      "type": "rectangle",
+      "x": 400,
+      "y": 68,
+      "width": 290,
+      "height": 220,
+      "strokeColor": "#5C2D91",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "id": "spa_hdr",
+      "type": "text",
+      "x": 400,
+      "y": 73,
+      "width": 290,
+      "height": 28,
+      "text": "SPA (Docker Container)",
+      "fontSize": 15,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "msal_box",
+      "type": "rectangle",
+      "x": 418,
+      "y": 112,
+      "width": 254,
+      "height": 74,
+      "strokeColor": "#5C2D91",
+      "backgroundColor": "#E8DAEF",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "msal_box_lbl"
+        }
+      ]
+    },
+    {
+      "id": "msal_box_lbl",
+      "type": "text",
+      "x": 418,
+      "y": 112,
+      "width": 254,
+      "height": 74,
+      "text": "MSAL Browser\n(msal-browser.js)\nInteractive popup sign-in",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "msal_box"
+    },
+    {
+      "id": "spa_invoke",
+      "type": "rectangle",
+      "x": 418,
+      "y": 200,
+      "width": 254,
+      "height": 74,
+      "strokeColor": "#5C2D91",
+      "backgroundColor": "#E8DAEF",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "spa_invoke_lbl"
+        }
+      ]
+    },
+    {
+      "id": "spa_invoke_lbl",
+      "type": "text",
+      "x": 418,
+      "y": 200,
+      "width": 254,
+      "height": 74,
+      "text": "POST /invoke\nBearer <Entra JWT>\n(aud = Blueprint client_id)",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "spa_invoke"
+    },
+    {
+      "id": "ac_bg",
+      "type": "rectangle",
+      "x": 400,
+      "y": 310,
+      "width": 600,
+      "height": 490,
+      "strokeColor": "#F7630C",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "id": "ac_hdr",
+      "type": "text",
+      "x": 400,
+      "y": 315,
+      "width": 600,
+      "height": 28,
+      "text": "AWS AgentCore Runtime",
+      "fontSize": 15,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "inbound_id",
+      "type": "rectangle",
+      "x": 418,
+      "y": 358,
+      "width": 562,
+      "height": 72,
+      "strokeColor": "#F7630C",
+      "backgroundColor": "#FFF4CE",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "inbound_id_lbl"
+        }
+      ]
+    },
+    {
+      "id": "inbound_id_lbl",
+      "type": "text",
+      "x": 418,
+      "y": 358,
+      "width": 562,
+      "height": 72,
+      "text": "AgentCore Inbound Identity\nValidates Entra JWT (iss, aud, tenant) \u2014 forwards workloadaccesstoken header to container",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "inbound_id"
+    },
+    {
+      "id": "agent_ctr",
+      "type": "rectangle",
+      "x": 418,
+      "y": 450,
+      "width": 562,
+      "height": 330,
+      "strokeColor": "#F7630C",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "id": "agent_ctr_hdr",
+      "type": "text",
+      "x": 418,
+      "y": 455,
+      "width": 562,
+      "height": 22,
+      "text": "Agent Container (Python / Strands / BedrockAgentCore)",
+      "fontSize": 11,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "strands",
+      "type": "rectangle",
+      "x": 433,
+      "y": 490,
+      "width": 215,
+      "height": 76,
+      "strokeColor": "#107C10",
+      "backgroundColor": "#DFF6DD",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "strands_lbl"
+        }
+      ]
+    },
+    {
+      "id": "strands_lbl",
+      "type": "text",
+      "x": 433,
+      "y": 490,
+      "width": 215,
+      "height": 76,
+      "text": "Strands Agent\nAmazon Nova Micro\n(eu.amazon.nova-micro-v1:0)",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "strands"
+    },
+    {
+      "id": "sysprompt",
+      "type": "rectangle",
+      "x": 433,
+      "y": 582,
+      "width": 215,
+      "height": 76,
+      "strokeColor": "#107C10",
+      "backgroundColor": "#DFF6DD",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "sysprompt_lbl"
+        }
+      ]
+    },
+    {
+      "id": "sysprompt_lbl",
+      "type": "text",
+      "x": 433,
+      "y": 582,
+      "width": 215,
+      "height": 76,
+      "text": "System Prompt\nMCP tools \u2192 Graph/Entra\ncall_echo_api \u2192 API test",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "sysprompt"
+    },
+    {
+      "id": "fmi_obo",
+      "type": "rectangle",
+      "x": 663,
+      "y": 490,
+      "width": 297,
+      "height": 148,
+      "strokeColor": "#0078D4",
+      "backgroundColor": "#CFE4FA",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "fmi_obo_lbl"
+        }
+      ]
+    },
+    {
+      "id": "fmi_obo_lbl",
+      "type": "text",
+      "x": 663,
+      "y": 490,
+      "width": 297,
+      "height": 148,
+      "text": "Two-Stage Token Exchange\n\nStage 1 (FMI):\n  Blueprint CCA \u2192 T1 assertion\n\nStage 2 (OBO):\n  Agent CCA + T1 + user JWT \u2192 TR",
+      "fontSize": 11,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "left",
+      "verticalAlign": "middle",
+      "containerId": "fmi_obo"
+    },
+    {
+      "id": "echo_tool",
+      "type": "rectangle",
+      "x": 433,
+      "y": 686,
+      "width": 527,
+      "height": 72,
+      "strokeColor": "#107C10",
+      "backgroundColor": "#DFF6DD",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "echo_tool_lbl"
+        }
+      ]
+    },
+    {
+      "id": "echo_tool_lbl",
+      "type": "text",
+      "x": 433,
+      "y": 686,
+      "width": 527,
+      "height": 72,
+      "text": "@tool call_echo_api(prompt) \u2014 acquires TR via FMI/OBO, POSTs to Echo Lambda with Bearer TR",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "echo_tool"
+    },
+    {
+      "id": "mcp_bg",
+      "type": "rectangle",
+      "x": 1020,
+      "y": 68,
+      "width": 360,
+      "height": 220,
+      "strokeColor": "#0078D4",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "id": "mcp_hdr",
+      "type": "text",
+      "x": 1020,
+      "y": 73,
+      "width": 360,
+      "height": 28,
+      "text": "Microsoft 365 MCP Server",
+      "fontSize": 15,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "mcp_srv",
+      "type": "rectangle",
+      "x": 1038,
+      "y": 112,
+      "width": 324,
+      "height": 74,
+      "strokeColor": "#0078D4",
+      "backgroundColor": "#CFE4FA",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "mcp_srv_lbl"
+        }
+      ]
+    },
+    {
+      "id": "mcp_srv_lbl",
+      "type": "text",
+      "x": 1038,
+      "y": 112,
+      "width": 324,
+      "height": 74,
+      "text": "Enterprise MCP Server\nGraph / Entra / M365 tools\nStreamable HTTP transport",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "mcp_srv"
+    },
+    {
+      "id": "mcp_auth",
+      "type": "rectangle",
+      "x": 1038,
+      "y": 202,
+      "width": 324,
+      "height": 72,
+      "strokeColor": "#0078D4",
+      "backgroundColor": "#CFE4FA",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "mcp_auth_lbl"
+        }
+      ]
+    },
+    {
+      "id": "mcp_auth_lbl",
+      "type": "text",
+      "x": 1038,
+      "y": 202,
+      "width": 324,
+      "height": 72,
+      "text": "Auth: per-request TR\nscoped to MCP Server App Reg\n(FMI/OBO per invocation)",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "mcp_auth"
+    },
+    {
+      "id": "aws_bg",
+      "type": "rectangle",
+      "x": 1020,
+      "y": 310,
+      "width": 360,
+      "height": 490,
+      "strokeColor": "#107C10",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "id": "aws_hdr",
+      "type": "text",
+      "x": 1020,
+      "y": 315,
+      "width": 360,
+      "height": 28,
+      "text": "AWS Backend (CloudFormation)",
+      "fontSize": 15,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "echo_lambda",
+      "type": "rectangle",
+      "x": 1038,
+      "y": 358,
+      "width": 324,
+      "height": 76,
+      "strokeColor": "#107C10",
+      "backgroundColor": "#DFF6DD",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "echo_lambda_lbl"
+        }
+      ]
+    },
+    {
+      "id": "echo_lambda_lbl",
+      "type": "text",
+      "x": 1038,
+      "y": 358,
+      "width": 324,
+      "height": 76,
+      "text": "Echo API Lambda (Python)\nPOST /echo \u2192 echoes message\nGET /health",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "echo_lambda"
+    },
+    {
+      "id": "jwt_auth",
+      "type": "rectangle",
+      "x": 1038,
+      "y": 452,
+      "width": 324,
+      "height": 76,
+      "strokeColor": "#0078D4",
+      "backgroundColor": "#CFE4FA",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "jwt_auth_lbl"
+        }
+      ]
+    },
+    {
+      "id": "jwt_auth_lbl",
+      "type": "text",
+      "x": 1038,
+      "y": 452,
+      "width": 324,
+      "height": 76,
+      "text": "Lambda JWT Authorizer\nValidates TR: iss + aud + tenant\n(Direct Entra validation)",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "jwt_auth"
+    },
+    {
+      "id": "secrets",
+      "type": "rectangle",
+      "x": 1038,
+      "y": 546,
+      "width": 324,
+      "height": 76,
+      "strokeColor": "#D13438",
+      "backgroundColor": "#FDE7E9",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "secrets_lbl"
+        }
+      ]
+    },
+    {
+      "id": "secrets_lbl",
+      "type": "text",
+      "x": 1038,
+      "y": 546,
+      "width": 324,
+      "height": 76,
+      "text": "AWS Secrets Manager\nBlueprint clientId + clientSecret\n(lazy-loaded, in-memory cached)",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "secrets"
+    },
+    {
+      "id": "iam_role",
+      "type": "rectangle",
+      "x": 1038,
+      "y": 638,
+      "width": 324,
+      "height": 76,
+      "strokeColor": "#F7630C",
+      "backgroundColor": "#FFF4CE",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "iam_role_lbl"
+        }
+      ]
+    },
+    {
+      "id": "iam_role_lbl",
+      "type": "text",
+      "x": 1038,
+      "y": 638,
+      "width": 324,
+      "height": 76,
+      "text": "IAM Execution Role\nBedrock + ECR + Logs\n+ SecretsManager access",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "iam_role"
+    },
+    {
+      "id": "ecr",
+      "type": "rectangle",
+      "x": 1038,
+      "y": 730,
+      "width": 324,
+      "height": 46,
+      "strokeColor": "#F7630C",
+      "backgroundColor": "#FFF4CE",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "type": "text",
+          "id": "ecr_lbl"
+        }
+      ]
+    },
+    {
+      "id": "ecr_lbl",
+      "type": "text",
+      "x": 1038,
+      "y": 730,
+      "width": 324,
+      "height": 46,
+      "text": "ECR \u2014 Agent Container Image",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "ecr"
+    },
+    {
+      "id": "a1",
+      "type": "arrow",
+      "x": 418,
+      "y": 149,
+      "width": 60,
+      "height": 93,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -60,
+          93
+        ]
+      ],
+      "strokeColor": "#5C2D91",
+      "strokeWidth": 2,
+      "startBinding": {
+        "elementId": "msal_box",
+        "focus": 0,
+        "gap": 2
+      },
+      "endBinding": {
+        "elementId": "blueprint",
+        "focus": 0,
+        "gap": 2
+      }
+    },
+    {
+      "id": "a1_lbl",
+      "type": "text",
+      "x": 330,
+      "y": 170,
+      "width": 100,
+      "height": 30,
+      "text": "\u2460 sign-in\n(popup)",
+      "fontSize": 10,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "a2",
+      "type": "arrow",
+      "x": 545,
+      "y": 274,
+      "width": 150,
+      "height": 84,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          150,
+          84
+        ]
+      ],
+      "strokeColor": "#5C2D91",
+      "strokeWidth": 2,
+      "startBinding": {
+        "elementId": "spa_invoke",
+        "focus": 0,
+        "gap": 2
+      },
+      "endBinding": {
+        "elementId": "inbound_id",
+        "focus": 0,
+        "gap": 2
+      }
+    },
+    {
+      "id": "a2_lbl",
+      "type": "text",
+      "x": 552,
+      "y": 295,
+      "width": 130,
+      "height": 30,
+      "text": "\u2461 POST /invoke\nBearer JWT",
+      "fontSize": 10,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "a3",
+      "type": "arrow",
+      "x": 699,
+      "y": 430,
+      "width": 0,
+      "height": 20,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          20
+        ]
+      ],
+      "strokeColor": "#F7630C",
+      "strokeWidth": 2,
+      "startBinding": {
+        "elementId": "inbound_id",
+        "focus": 0,
+        "gap": 2
+      },
+      "endBinding": {
+        "elementId": "agent_ctr",
+        "focus": 0,
+        "gap": 2
+      }
+    },
+    {
+      "id": "a3_lbl",
+      "type": "text",
+      "x": 705,
+      "y": 434,
+      "width": 155,
+      "height": 20,
+      "text": "\u2462 forward headers",
+      "fontSize": 10,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "a4",
+      "type": "arrow",
+      "x": 1038,
+      "y": 584,
+      "width": 78,
+      "height": 30,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -78,
+          -30
+        ]
+      ],
+      "strokeColor": "#D13438",
+      "strokeWidth": 2,
+      "startBinding": {
+        "elementId": "secrets",
+        "focus": 0,
+        "gap": 2
+      },
+      "endBinding": {
+        "elementId": "fmi_obo",
+        "focus": 0,
+        "gap": 2
+      }
+    },
+    {
+      "id": "a4_lbl",
+      "type": "text",
+      "x": 940,
+      "y": 560,
+      "width": 120,
+      "height": 20,
+      "text": "\u2463 Blueprint creds",
+      "fontSize": 10,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "a5",
+      "type": "arrow",
+      "x": 663,
+      "y": 564,
+      "width": 305,
+      "height": 48,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -305,
+          48
+        ]
+      ],
+      "strokeColor": "#0078D4",
+      "strokeWidth": 2,
+      "startBinding": {
+        "elementId": "fmi_obo",
+        "focus": 0,
+        "gap": 2
+      },
+      "endBinding": {
+        "elementId": "token_ep",
+        "focus": 0,
+        "gap": 2
+      }
+    },
+    {
+      "id": "a5_lbl",
+      "type": "text",
+      "x": 400,
+      "y": 570,
+      "width": 180,
+      "height": 30,
+      "text": "\u2464 FMI + OBO exchange",
+      "fontSize": 10,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "a6",
+      "type": "arrow",
+      "x": 960,
+      "y": 722,
+      "width": 78,
+      "height": 290,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          78,
+          -290
+        ]
+      ],
+      "strokeColor": "#107C10",
+      "strokeWidth": 2,
+      "startBinding": {
+        "elementId": "echo_tool",
+        "focus": 0,
+        "gap": 2
+      },
+      "endBinding": {
+        "elementId": "echo_lambda",
+        "focus": 0,
+        "gap": 2
+      }
+    },
+    {
+      "id": "a6_lbl",
+      "type": "text",
+      "x": 964,
+      "y": 560,
+      "width": 95,
+      "height": 30,
+      "text": "\u2465 POST /echo\n(Bearer TR)",
+      "fontSize": 10,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    },
+    {
+      "id": "a7",
+      "type": "arrow",
+      "x": 960,
+      "y": 510,
+      "width": 78,
+      "height": 340,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          78,
+          -340
+        ]
+      ],
+      "strokeColor": "#0078D4",
+      "strokeWidth": 2,
+      "startBinding": {
+        "elementId": "fmi_obo",
+        "focus": 0,
+        "gap": 2
+      },
+      "endBinding": {
+        "elementId": "mcp_srv",
+        "focus": 0,
+        "gap": 2
+      }
+    },
+    {
+      "id": "a7_lbl",
+      "type": "text",
+      "x": 964,
+      "y": 330,
+      "width": 95,
+      "height": 30,
+      "text": "\u2466 MCP call\n(Bearer TR)",
+      "fontSize": 10,
+      "fontFamily": 1,
+      "strokeColor": "#000000",
+      "textAlign": "center",
+      "verticalAlign": "top"
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  }
+}

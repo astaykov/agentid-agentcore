@@ -1,0 +1,328 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AgentCore + Entra Agent ID PoC. Deploys RuntimeExecutionRole, AgentCore Runtime, and RuntimeEndpoint.
+
+Parameters:
+
+  RuntimeName:
+    Type: String
+    Default: agentid-poc
+
+  EndpointName:
+    Type: String
+    Default: default
+
+  ArtifactBucket:
+    Type: String
+    Default: agentid-poc-artifacts
+
+  ArtifactKey:
+    Type: String
+    Default: agent.zip
+
+  PythonRuntime:
+    Type: String
+    Default: PYTHON_3_12
+
+  BedrockModelId:
+    Type: String
+    Default: eu.amazon.nova-micro-v1:0
+
+  EntraTenantId:
+    Type: String
+
+  AgentIdentityId:
+    Type: String
+
+  BlueprintSecretArn:
+    Type: String
+
+  EchoApiClientId:
+    Type: String
+    Description: >
+      The Entra app registration client ID for the Echo API (ECHO_API_CLIENT_ID).
+      Used as the JWT audience in the API Gateway authorizer.
+
+  EchoApiScope:
+    Type: String
+    Default: api://echo-api/access_as_user
+
+  McpServerUrl:
+    Type: String
+
+  McpServerScope:
+    Type: String
+
+  # Inbound Identity — Entra JWT authorizer validates exactly three things:
+  #   iss — the issuer (Entra tenant), validated automatically via DiscoveryUrl
+  #   aud — must equal the Blueprint client ID (AgentCoreAppClientId)
+  #   scp — must contain the delegated scope 'access_agent' (AllowedScopes)
+  # DiscoveryUrl: Entra OIDC metadata endpoint for the tenant
+  # AllowedAudience: the Blueprint app reg client ID that is the token audience
+  EntraDiscoveryUrl:
+    Type: String
+    Description: >
+      Entra OIDC discovery URL:
+      https://login.microsoftonline.com/{tenant-id}/v2.0/.well-known/openid-configuration
+
+  AgentCoreAppClientId:
+    Type: String
+    Description: >
+      The Entra app registration client ID that is the audience (aud) of the
+      access token the SPA requests. Typically the Blueprint app reg client ID.
+
+  DeployId:
+    Type: String
+    Default: initial
+    Description: Timestamp-based value changed on each deploy to force runtime reload.
+
+Resources:
+
+  RuntimeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-runtime-exec-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RuntimePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeModel
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: '*'
+              - Sid: SecretsAccess
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref BlueprintSecretArn
+                  - !Sub '${BlueprintSecretArn}-*'
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Sid: S3GetObject
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${ArtifactBucket}/*'
+              - Sid: S3ListBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${ArtifactBucket}'
+
+  # ── Echo API (Lambda + API Gateway HTTP API with Entra JWT authorizer) ──────
+
+  EchoLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-echo-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  EchoLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-echo'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt EchoLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+
+          # Claims surfaced back to the caller, in display order. These are the
+          # non-secret routing/identity claims of the downstream TR token the
+          # agent minted via OBO (audience = this Echo API).
+          CLAIM_KEYS = [
+              'iss', 'aud', 'sub', 'azp', 
+              'preferred_username', 'name',
+              'idtyp', 'xms_idrel', 'xms_sub_fct', 'xms_tnt_fct', 'xms_par_app_azp',
+          ]
+
+          def handler(event, context):
+              method = (event.get('requestContext') or {}).get('http', {}).get('method', 'POST')
+              if method == 'GET':
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Content-Type': 'application/json'},
+                      'body': json.dumps({'status': 'ok'}),
+                  }
+              body = json.loads(event.get('body') or '{}')
+              message = body.get('message', '')
+              claims = (
+                  (event.get('requestContext') or {})
+                  .get('authorizer', {})
+                  .get('jwt', {})
+                  .get('claims', {})
+              )
+              caller = claims.get('preferred_username') or claims.get('oid', 'unknown')
+              claim_lines = [
+                  '{}: {}'.format(k, claims.get(k, '(absent)')) for k in CLAIM_KEYS
+              ]
+              echo = 'Hi, this is what I see for you:\n' + '\n'.join(claim_lines)
+              return {
+                  'statusCode': 200,
+                  'headers': {'Content-Type': 'application/json'},
+                  'body': json.dumps({'echo': echo, 'caller': caller}),
+              }
+
+  EchoHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-echo-api'
+      ProtocolType: HTTP
+
+  EchoJwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref EchoHttpApi
+      AuthorizerType: JWT
+      Name: EntraJwtAuthorizer
+      IdentitySource:
+        - $request.header.Authorization
+      JwtConfiguration:
+        Audience:
+          - !Ref EchoApiClientId
+        Issuer: !Sub 'https://login.microsoftonline.com/${EntraTenantId}/v2.0'
+
+  EchoLambdaIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref EchoHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt EchoLambdaFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  EchoApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref EchoHttpApi
+      RouteKey: POST /echo
+      AuthorizationType: JWT
+      AuthorizerId: !Ref EchoJwtAuthorizer
+      Target: !Sub 'integrations/${EchoLambdaIntegration}'
+
+  EchoApiHealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref EchoHttpApi
+      RouteKey: GET /health
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${EchoLambdaIntegration}'
+
+  EchoApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref EchoHttpApi
+      StageName: $default
+      AutoDeploy: true
+
+  EchoLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt EchoLambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${EchoHttpApi}/*'
+
+  AgentRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      AgentRuntimeName: !Ref RuntimeName
+      AgentRuntimeArtifact:
+        CodeConfiguration:
+          Code:
+            S3:
+              Bucket: !Ref ArtifactBucket
+              Prefix: !Ref ArtifactKey
+          Runtime: !Ref PythonRuntime
+          EntryPoint:
+            - app.py
+      RoleArn: !GetAtt RuntimeExecutionRole.Arn
+      EnvironmentVariables:
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        AWS_DEFAULT_REGION: !Ref AWS::Region
+        ENTRA_TENANT_ID: !Ref EntraTenantId
+        AGENT_IDENTITY_ID: !Ref AgentIdentityId
+        BLUEPRINT_SECRET_ARN: !Ref BlueprintSecretArn
+        ECHO_API_URL: !Sub 'https://${EchoHttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+        ECHO_API_SCOPE: !Ref EchoApiScope
+        MCP_SERVER_URL: !Ref McpServerUrl
+        MCP_SERVER_SCOPE: !Ref McpServerScope
+        DEPLOY_ID: !Ref DeployId
+      NetworkConfiguration:
+        NetworkMode: PUBLIC
+      ProtocolConfiguration: HTTP
+      RequestHeaderConfiguration:
+        RequestHeaderAllowlist:
+          - Authorization
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref EntraDiscoveryUrl
+          AllowedAudience:
+            - !Ref AgentCoreAppClientId
+            - !Sub 'api://${AgentCoreAppClientId}'
+          AllowedScopes:
+            - access_agent
+
+  AgentRuntimeEndpoint:
+    Type: AWS::BedrockAgentCore::RuntimeEndpoint
+    Properties:
+      AgentRuntimeId: !GetAtt AgentRuntime.AgentRuntimeId
+      Name: !Ref EndpointName
+
+Outputs:
+
+  RuntimeId:
+    Value: !GetAtt AgentRuntime.AgentRuntimeId
+
+  RuntimeArn:
+    Value: !GetAtt AgentRuntime.AgentRuntimeArn
+
+  RuntimeVersion:
+    Value: !GetAtt AgentRuntime.AgentRuntimeVersion
+
+  RuntimeStatus:
+    Value: !GetAtt AgentRuntime.Status
+
+  EndpointId:
+    Value: !GetAtt AgentRuntimeEndpoint.Id
+
+  EndpointArn:
+    Value: !GetAtt AgentRuntimeEndpoint.AgentRuntimeEndpointArn
+
+  EndpointStatus:
+    Value: !GetAtt AgentRuntimeEndpoint.Status
+
+  ExecutionRoleArn:
+    Value: !GetAtt RuntimeExecutionRole.Arn
+
+  ArtifactBucket:
+    Value: !Ref ArtifactBucket
+
+  ArtifactKey:
+    Value: !Ref ArtifactKey
+
+  EchoApiUrl:
+    Description: Echo API base URL (API Gateway HTTP API with Entra JWT authorizer)
+    Value: !Sub 'https://${EchoHttpApi}.execute-api.${AWS::Region}.amazonaws.com'

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentCore + Entra Agent ID PoC</title>
+
+  <!--
+    Chat UI layout adapted from the Bootdey "chat app" snippet:
+      https://www.bootdey.com/snippets/view/chat-app
+    Bootdey snippets are released under the MIT License (https://www.bootdey.com/license):
+
+      MIT License — Copyright (c) Bootdey
+      Permission is hereby granted, free of charge, to any person obtaining a copy of
+      this software and associated documentation files (the "Software"), to deal in the
+      Software without restriction... The above copyright notice and this permission
+      notice shall be included in all copies or substantial portions of the Software.
+
+    MIT does not require a visible UI backlink, only retention of this notice in copies.
+    A small "UI template by Bootdey" credit is kept in the footer as a courtesy.
+    Layout ported from Bootstrap 4.5.0 + Font Awesome to Bootstrap 5.3.3 + Bootstrap Icons.
+  -->
+
+  <!-- CDN dependencies — every dependency pinned to an exact version (no @latest), served from jsDelivr -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
+
+  <style>
+    body {
+      background-color: #f4f7f6;
+      color: #1a1a2e;
+      min-height: 100vh;
+    }
+
+    .app-shell { max-width: 960px; margin: 0 auto; padding: 1.5rem 1rem 2rem; }
+
+    .app-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-bottom: 1.25rem;
+    }
+    .app-header h1 { font-size: 1.35rem; font-weight: 700; color: #0078d4; margin: 0; }
+    .app-header .user-info { font-size: 0.85rem; color: #555; }
+
+    /* --- chat-app card (adapted from Bootdey snippet) --- */
+    .chat-app .card {
+      background: #fff;
+      border: 0;
+      border-radius: .55rem;
+      box-shadow: 0 1px 2px 0 rgb(0 0 0 / 10%);
+      overflow: hidden;
+    }
+
+    .chat-app .people-list {
+      padding: 18px;
+      border-right: 1px solid #eaeaea;
+    }
+    .chat-app .people-list .chat-list li {
+      padding: 10px 12px;
+      list-style: none;
+      border-radius: 6px;
+      background: #efefef;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .chat-app .people-list .name { font-size: 15px; font-weight: 600; }
+    .chat-app .people-list .status { color: #86c541; font-size: 13px; }
+    .chat-app .people-list .avatar-glyph { font-size: 2rem; color: #0078d4; line-height: 1; }
+
+    .chat-app .chat { display: flex; flex-direction: column; min-width: 0; }
+
+    .chat .chat-header {
+      padding: 15px 20px;
+      border-bottom: 2px solid #f4f7f6;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .chat .chat-header .avatar-glyph { font-size: 2.2rem; color: #0078d4; }
+    .chat .chat-header h6 { margin: 0; font-weight: 700; }
+    .chat .chat-header small { color: #6c757d; }
+
+    /* The scroll box — fixed, viewport-relative height; accumulates history; scrolls */
+    .chat .chat-history {
+      padding: 20px;
+      height: 58vh;
+      min-height: 320px;
+      overflow-y: auto;
+      background: #fff;
+    }
+    .chat .chat-history ul { padding: 0; margin: 0; }
+    .chat .chat-history ul li { list-style: none; margin-bottom: 26px; }
+    .chat .chat-history ul li:last-child { margin-bottom: 4px; }
+
+    .chat-history .message-data { margin-bottom: 8px; font-size: 0.8rem; color: #6c757d; }
+    .chat-history .message-data .avatar-glyph { font-size: 1.25rem; vertical-align: middle; }
+    .chat-history .message-data-time { padding: 0 6px; }
+
+    .chat-history .message {
+      color: #444;
+      padding: 14px 18px;
+      line-height: 1.5;
+      font-size: 0.97rem;
+      border-radius: 8px;
+      display: inline-block;
+      max-width: 85%;
+      position: relative;
+      word-break: break-word;
+      text-align: left;
+    }
+    /* User (mine) → right aligned */
+    .chat-history .my-message { background: #d9ecff; }
+    .chat-history li.mine { text-align: right; }
+    .chat-history li.mine .message-data { text-align: right; }
+    /* Agent (other) → left aligned */
+    .chat-history .other-message { background: #e8f1f3; }
+
+    /* Markdown niceties inside agent bubbles */
+    .chat-history .message :first-child { margin-top: 0; }
+    .chat-history .message :last-child { margin-bottom: 0; }
+    .chat-history .message pre {
+      background: #1e1e2e; color: #f8f8f2; padding: 10px 12px;
+      border-radius: 6px; overflow-x: auto; font-size: 0.85rem;
+    }
+    .chat-history .message code {
+      background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 4px; font-size: 0.88em;
+    }
+    .chat-history .message pre code { background: transparent; padding: 0; }
+    .chat-history .message ul, .chat-history .message ol { padding-left: 1.4rem; margin-bottom: .4rem; }
+
+    .status-badge { font-size: 1.1rem; vertical-align: middle; margin-right: 4px; }
+
+    /* Collapsible reasoning (native <details>, no extra JS) */
+    .reasoning {
+      margin-top: 10px;
+      border: 1px solid #d8e0e3;
+      border-radius: 6px;
+      background: #fbfdfd;
+    }
+    .reasoning > summary {
+      cursor: pointer;
+      padding: 6px 10px;
+      font-size: 0.82rem;
+      color: #5a6b73;
+      list-style: none;
+      user-select: none;
+    }
+    .reasoning > summary::-webkit-details-marker { display: none; }
+    .reasoning > summary::before { content: "\F2EA"; font-family: "bootstrap-icons"; margin-right: 6px; }
+    .reasoning[open] > summary::before { content: "\F235"; }
+    .reasoning .reasoning-body {
+      padding: 4px 12px 10px;
+      font-size: 0.85rem;
+      color: #555;
+      border-top: 1px solid #eef2f3;
+    }
+
+    .chat .chat-message { padding: 16px 20px; border-top: 1px solid #f0f0f0; }
+
+    /* Message input: starts as a single visual line, auto-grows with content up
+       to a max, then shows an internal scrollbar. Enter sends; Ctrl/Shift+Enter
+       inserts a newline (wired in app.js). */
+    #message-input {
+      resize: none;
+      overflow-y: hidden;        /* JS flips this to auto once max-height is hit */
+      max-height: 140px;         /* ~5–6 rows; keep in sync with MAX_INPUT_HEIGHT in app.js */
+      line-height: 1.5;
+    }
+
+    @media (max-width: 767px) {
+      .chat .chat-history { height: 50vh; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <h1>AgentCore + Entra Agent ID PoC</h1>
+      <div class="d-flex align-items-center gap-3">
+        <div id="user-info" class="user-info"></div>
+        <button id="btn-signin"  class="btn btn-primary btn-sm">Sign In</button>
+        <button id="btn-signout" class="btn btn-outline-secondary btn-sm" style="display:none;">Sign Out</button>
+      </div>
+    </header>
+
+    <!-- Auth/global error alert (sign-in / sign-out failures) -->
+    <div id="auth-alert" class="alert alert-warning d-none" role="alert"></div>
+
+    <section id="chat-section" class="chat-app" style="display:none;">
+      <div class="card">
+        <div class="row g-0">
+          <!-- Single-contact sidebar (the agent) — faithful to the snippet's people-list -->
+          <div class="col-md-3 people-list d-none d-md-block">
+            <ul class="list-unstyled chat-list mt-1 mb-0">
+              <li>
+                <i class="bi bi-robot avatar-glyph"></i>
+                <div class="about">
+                  <div class="name">AgentCore</div>
+                  <div class="status"><i class="bi bi-circle-fill" style="font-size:8px;"></i> online</div>
+                </div>
+              </li>
+            </ul>
+          </div>
+
+          <!-- Chat column -->
+          <div class="col-md-9 chat">
+            <div class="chat-header">
+              <i class="bi bi-robot avatar-glyph"></i>
+              <div>
+                <h6>AgentCore Agent</h6>
+                <small>Entra Agent ID · responses are model-generated</small>
+              </div>
+            </div>
+
+            <!-- Scroll box: fixed height, accumulates the full session history -->
+            <div class="chat-history" id="chat-history">
+              <ul id="chat-history-list" class="mb-0"></ul>
+            </div>
+
+            <div class="chat-message">
+              <div class="input-group">
+                <span class="input-group-text"><i class="bi bi-chat-dots"></i></span>
+                <textarea id="message-input" class="form-control" rows="1"
+                          placeholder="Ask the agent something…" autocomplete="off"></textarea>
+                <button id="btn-send" class="btn btn-primary">
+                  <i class="bi bi-send"></i> Send
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="text-center text-muted mt-3" style="font-size:0.78rem;">
+        UI template by <a href="https://www.bootdey.com/snippets/view/chat-app" target="_blank" rel="noopener">Bootdey</a> (MIT)
+      </footer>
+    </section>
+  </div>
+
+  <!-- MSAL (pinned, verified-200 jsDelivr build — unchanged from prior fix) -->
+  <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
+  <!-- Markdown renderer + HTML sanitizer — exact pins, jsDelivr; load BEFORE app.js -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <!-- Bootstrap bundle (optional components/JS); not required for the chat scroll box -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+  <script src="msal-config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

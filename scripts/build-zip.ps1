@@ -1,0 +1,128 @@
+#Requires -Version 7
+<#
+.SYNOPSIS
+    Build the agent runtime ZIP for ARM64 (manylinux2014_aarch64) using Docker cross-compilation.
+    Python packages are downloaded as pre-built aarch64 wheels; app.py is the entry point.
+
+.PARAMETER OutputZip
+    Output path for the ZIP file (relative to repo root). Default: build/agent-runtime.zip
+
+.PARAMETER DockerPlatform
+    Docker --platform flag (host architecture). Default: linux/amd64
+
+.PARAMETER TargetPlatform
+    pip --platform tag for the download target. Default: manylinux2014_aarch64
+
+.PARAMETER TargetPythonVersion
+    Python version string passed to pip --python-version. Default: 3.12
+
+.PARAMETER TargetAbi
+    Python ABI tag passed to pip --abi. Default: cp312
+
+.EXAMPLE
+    .\build-zip.ps1
+    .\build-zip.ps1 -OutputZip build/agent-runtime.zip -TargetPlatform manylinux2014_aarch64
+#>
+[CmdletBinding()]
+param(
+    [string]$OutputZip           = "build/agent-runtime.zip",
+    [string]$DockerPlatform      = "linux/amd64",
+    [string]$TargetPlatform      = "manylinux2014_aarch64",
+    [string]$TargetPythonVersion = "3.12",
+    [string]$TargetAbi           = "cp312"
+)
+
+$ErrorActionPreference = 'Stop'
+
+$root         = (Get-Item (Join-Path $PSScriptRoot '..')).FullName
+# agent/ dir is mounted into Docker so both src/ and requirements.txt are reachable
+$agentDir     = Join-Path $root 'agent'
+$agentSrcDir  = Join-Path $root 'agent\src'
+$agentReqFile = Join-Path $root 'agent\requirements.txt'
+$outputZipFull = Join-Path $root ($OutputZip -replace '/', '\')
+$buildDir     = Split-Path $outputZipFull -Parent
+$packagesDir  = Join-Path $buildDir 'packages'
+$stageDir     = Join-Path $buildDir 'stage'
+
+Write-Host "[build-zip] Agent src : $agentSrcDir"
+Write-Host "[build-zip] Output ZIP: $outputZipFull"
+Write-Host "[build-zip] Target    : $TargetPlatform  Python $TargetPythonVersion / $TargetAbi"
+
+# --- Validate source ----------------------------------------------------------
+if (-not (Test-Path $agentSrcDir)) {
+    throw "Agent source directory not found: $agentSrcDir"
+}
+if (-not (Test-Path $agentReqFile)) {
+    throw "requirements.txt not found: $agentReqFile"
+}
+
+# --- Check Docker is running --------------------------------------------------
+Write-Host "Checking Docker..."
+docker info 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Docker is not running or not accessible. Please start Docker Desktop and try again."
+}
+Write-Host "Docker OK."
+
+# --- Prepare build directories ------------------------------------------------
+if (-not (Test-Path $buildDir))     { New-Item -ItemType Directory -Path $buildDir     | Out-Null; Write-Host "Created: $buildDir" }
+if (Test-Path $packagesDir)         { Remove-Item $packagesDir -Recurse -Force }
+if (Test-Path $stageDir)            { Remove-Item $stageDir    -Recurse -Force }
+if (Test-Path $outputZipFull)       { Remove-Item $outputZipFull -Force }
+New-Item -ItemType Directory -Path $packagesDir | Out-Null
+New-Item -ItemType Directory -Path $stageDir    | Out-Null
+
+# --- Step 1: Install packages via Docker (ARM64 cross-compilation) ------------
+Write-Host ""
+Write-Host "--- Step 1: Installing Python packages for $TargetPlatform via Docker ---"
+# Mount agent/ as /src so requirements.txt is at /src/requirements.txt
+# Mount build/packages as /build/packages for the pip output
+$pipCmd = "pip install --upgrade pip && pip install -r /src/requirements.txt " +
+          "--target /build/packages " +
+          "--platform $TargetPlatform " +
+          "--python-version $TargetPythonVersion " +
+          "--only-binary=:all: " +
+          "--implementation cp " +
+          "--abi $TargetAbi"
+
+docker run --rm `
+    --platform $DockerPlatform `
+    -v "${agentDir}:/src" `
+    -v "${packagesDir}:/build/packages" `
+    "python:$TargetPythonVersion-slim" `
+    bash -c $pipCmd
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Docker pip install failed (exit $LASTEXITCODE)."
+}
+Write-Host "Packages installed."
+
+# --- Step 2: Stage agent source files -----------------------------------------
+Write-Host ""
+Write-Host "--- Step 2: Staging agent source files ---"
+Get-ChildItem -Path $agentSrcDir -Filter '*.py' | ForEach-Object {
+    $destName = $_.Name
+    # AgentCore entry point must be app.py; rename agent.py if present
+    if ($_.Name -eq 'agent.py') {
+        $destName = 'app.py'
+        Write-Host "  agent.py -> app.py  (AgentCore entry point rename)"
+    }
+    Copy-Item -Path $_.FullName -Destination (Join-Path $stageDir $destName) -Force
+    Write-Host "  Staged: $destName"
+}
+
+Write-Host "  Copying installed packages into stage..."
+Copy-Item -Path "$packagesDir\*" -Destination $stageDir -Recurse -Force
+
+# --- Step 3: Create ZIP -------------------------------------------------------
+Write-Host ""
+Write-Host "--- Step 3: Creating ZIP ---"
+Compress-Archive -Path "$stageDir\*" -DestinationPath $outputZipFull -Force
+
+# --- Cleanup ------------------------------------------------------------------
+Remove-Item $stageDir    -Recurse -Force
+Remove-Item $packagesDir -Recurse -Force
+
+$zipInfo = Get-Item $outputZipFull
+Write-Host ""
+Write-Host "[build-zip] Done: $outputZipFull ($([math]::Round($zipInfo.Length / 1MB, 2)) MB)"

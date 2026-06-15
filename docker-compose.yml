@@ -1,0 +1,17 @@
+# Local development -- requires Docker Desktop
+# Usage:
+#   cp .env.example .env   (fill in your values)
+#   docker compose up --build
+#
+# Serves the SPA locally on http://localhost:3000. The SPA talks to the deployed
+# AgentCore Runtime only. The Echo API is the deployed Lambda + API Gateway
+# (see infra/cloudformation/stack.yaml) -- there is no local Echo service.
+
+services:
+  spa:
+    build:
+      context: ./spa
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    # SPA talks to AgentCore only

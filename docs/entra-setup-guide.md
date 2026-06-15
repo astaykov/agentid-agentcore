@@ -1,0 +1,553 @@
+# Entra Agent ID OBO Integration Specification
+
+**Author:** Fenster (Entra Engineer)  
+**Date:** 2026-06-08 (updated — sidecar replaced by MSAL Python)  
+**Status:** Authoritative — sidecar eliminated per Anton Staykov decision 2026-06-08  
+**Supersedes:** `.squad/decisions/inbox/fenster-obo-integration-spec.md`
+
+---
+
+## 1. The OBO Flow — Step by Step
+
+The Agent ID OBO flow is a **two-stage token exchange** that differs from standard OAuth2 OBO. The agent identity blueprint and the agent identity are *separate* Entra objects; the exchange must prove both the agent credential AND carry the user's delegated token.
+
+### Inputs
+
+| Input | Description |
+|---|---|
+| `Tc` | The user's access token issued to the **SPA** by Entra. Audience = Blueprint client_id. The SPA sends this to AgentCore; AgentCore passes it through to the Python agent. |
+| Blueprint `client_credential` | For PoC: a client secret stored in AWS Secrets Manager. Production: Federated Identity Credential (UAMI or AWS OIDC). |
+
+### Step-by-step
+
+### Step-by-step
+
+```
+Step 1 — SPA authenticates user
+  MSAL.js → Entra /authorize (auth code + PKCE)
+  Scope requested: api://{blueprint-client-id}/access_as_user
+  → Entra issues Tc (user JWT, aud = {blueprint-client-id})
+
+Step 2 — SPA calls AgentCore
+  POST {agentcore-endpoint}
+  Authorization: Bearer {Tc}
+  → AgentCore JWT authorizer validates Tc (OIDC discovery from Entra)
+  → AgentCore passes Tc through to the Python agent as the inbound bearer token
+
+Step 3 — Python agent extracts Tc from payload
+  The agent reads the inbound token from the payload (key: "token",
+  "authorization", or "access_token"). The raw JWT (no "Bearer " prefix) is
+  stored in a module-level variable for the duration of the invocation.
+
+Step 4 — MSAL Python: Stage 1 (FMI / T1)
+  Blueprint ConfidentialClientApplication calls acquire_token_for_client:
+  POST https://login.microsoftonline.com/{tenant-id}/oauth2/v2.0/token
+  client_id={blueprint-client-id}
+  &scope=api://AzureADTokenExchange/.default
+  &fmi_path={agent-identity-object-id}          <- Agent Identity Object ID
+  &client_assertion={blueprint-client-secret}    <- PoC: secret; Prod: cert
+  &grant_type=client_credentials
+  → Entra issues T1 (aud = blueprint-client-id, sub = agent-identity)
+  T1 is cached by the long-lived Blueprint CCA instance.
+
+Step 5 — MSAL Python: Stage 2 (OBO / TR)
+  A transient ConfidentialClientApplication is built with T1 as client_assertion.
+  POST https://login.microsoftonline.com/{tenant-id}/oauth2/v2.0/token
+  client_id={blueprint-client-id}
+  &scope=api://{echo-api-client-id}/access_as_user
+  &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+  &client_assertion={T1}                        <- proves agent identity
+  &grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer
+  &assertion={Tc}
+  &requested_token_use=on_behalf_of
+  → Entra validates: T1.aud == blueprint-client-id, Tc.aud == blueprint-client-id
+  → Entra issues TR (resource token, aud = echo-api-client-id, sub = user)
+
+Step 6 — Python agent calls Echo REST API directly
+  POST https://{echo-api-host}/echo
+  Authorization: Bearer {TR}
+  → Echo API validates TR; aud matches its own client_id; sub = original user
+  → Agent returns only the response body to the LLM — TR is never passed to LLM
+```
+
+### What makes Agent ID OBO different from standard OBO
+
+| Standard OAuth2 OBO | Agent ID OBO |
+|---|---|
+| One token exchange: assertion=user_token, client authenticates with secret/cert | Two-stage: first get T1 (blueprint→agent-identity impersonation), then OBO with T1 as client_assertion |
+| `client_assertion` = the client's own secret/cert JWT | `client_assertion` = T1, a token Entra just issued to prove the agent identity relationship |
+| Single app registration | Two Entra objects: Blueprint (under Agents) + Agent Identity (child object of Blueprint, Object ID only) |
+| `fmi_path` parameter not used | `fmi_path={agent-identity-object-id}` required in Stage 1 to target the child identity |
+
+---
+
+## 2. Entra Objects Required
+
+There are **four Entra objects** in this PoC. They are **not all app registrations** — see the type column carefully.
+
+| # | Name | Type | Has client_id? | Has client_secret? |
+|---|---|---|---|---|
+| 2a | `agentid-poc-spa` | App Registration (SPA, public client) | ✅ Yes | ❌ No |
+| 2b | `agentid-poc-blueprint` | Agent Identity Blueprint (created under Agents, not App registrations) | ✅ Yes | ✅ Yes (PoC) |
+| 2c | `agentid-poc-identity` | Agent Identity Object (new Entra object type, child of Blueprint) | ❌ No | ❌ No |
+| 2d | `agentid-poc-echo-api` | App Registration (Web API) | ✅ Yes | Optional |
+
+### 2a. App Registration — SPA Frontend (`agentid-poc-spa`)
+
+This is a standard public client SPA app registration. MSAL.js signs in users against this.
+
+| Property | Value |
+|---|---|
+| Display name | `agentid-poc-spa` |
+| Type | **App Registration** — Single-page application (public client) |
+| Platform | SPA — no client secret |
+| Redirect URI | `http://localhost:3000` (dev) / `https://{spa-host}` (prod) |
+| API permissions | `api://{blueprint-client-id}/access_as_user` (delegated) |
+| Admin consent required | No (user consent sufficient if tenant allows it) |
+
+### 2b. Agent Identity Blueprint (`agentid-poc-blueprint`)
+
+This is the **parent credential holder** — MSAL Python authenticates AS this Blueprint using its `client_id` and `client_secret` (PoC) or certificate (production). It is a **Blueprint object**, not a standard app registration. It is created under the **Agents** section in Entra admin center (not under App registrations).
+
+Created in: **Entra admin center → Agents → Blueprints → New** (the exact label may be "Agent Blueprints" or similar under the Agents section)
+
+| Property | Value |
+|---|---|
+| Display name | `agentid-poc-blueprint` |
+| Type | **Agent Identity Blueprint (Agents section — not App registrations)** |
+| Platform | Web / confidential client |
+| Client secret | PoC: store in AWS Secrets Manager (JSON key `clientSecret`). **Production: migrate to certificate — client_secret cannot satisfy SNI/x5c requirements for FMI in hardened tenants.** |
+| Expose an API → App ID URI | `api://{blueprint-client-id}` |
+| Expose an API → Scope | `access_as_user` (delegated) — this is what the SPA requests |
+| Scope description | "Access agent on behalf of user" |
+| Who can consent | Admins and users (or admins only — tenant policy dependent) |
+| API permissions | None required at blueprint level for OBO (handled at agent identity level) |
+
+> **Note:** The blueprint is the **audience** of both `Tc` and `T1`. Both tokens must have `aud = {blueprint-client-id}`.
+
+### 2c. Agent Identity Object (`agentid-poc-identity`)
+
+This is a **new Entra object type** — it is **NOT an app registration**. It is a child object of the Blueprint. It does **not** have its own `client_id` or `client_secret`. It inherits credentials from the Blueprint; the Blueprint impersonates it via the `fmi_path` parameter.
+
+#### How to create it
+
+**Option A — Entra admin center (recommended for PoC):**
+
+1. Navigate to: **Entra admin center → Identity → Agent identities → New**
+2. Fill in:
+   - **Display name:** `agentid-poc-identity`
+   - **Parent Blueprint:** select `agentid-poc-blueprint` (the app registration created in 2b)
+   - **InheritDelegatedPermissions:** `true`
+3. After creation, note the **Object ID** (`{agent-identity-object-id}`) — this is the only identifier the agent identity has.
+4. Add API permission: `api://{echo-api-client-id}/access_as_user` (delegated) → grant admin consent.
+
+**Option B — Microsoft Graph API:**
+
+```http
+POST https://graph.microsoft.com/v1.0/agentIdentities
+Content-Type: application/json
+
+{
+  "displayName": "agentid-poc-identity",
+  "parentAppId": "{blueprint-client-id}",
+  "inheritDelegatedPermissions": true
+}
+```
+
+Response includes the `id` field — this is the `{agent-identity-object-id}` used in `fmi_path`.
+
+#### Fields and properties
+
+| Property | Value |
+|---|---|
+| Display name | `agentid-poc-identity` |
+| Type | **Agent Identity Object** (new Entra object type — NOT an app registration) |
+| Parent Blueprint | `{blueprint-client-id}` (the Blueprint app registration above) |
+| `InheritDelegatedPermissions` | `true` — inherits permissions from Blueprint |
+| API permissions | `api://{echo-api-client-id}/access_as_user` (delegated) |
+| Admin consent | Required for the delegated permission on the Echo API |
+| **Object ID** | `{agent-identity-object-id}` — the ONLY identifier; used as `fmi_path` in token requests and `AgentIdentity` in sidecar calls |
+| client_id | ❌ **None** — the agent identity has no client_id |
+| client_secret | ❌ **None** — credentials are inherited from the Blueprint |
+
+> The agent identity does **not** have its own client secret. The Blueprint impersonates it using `fmi_path={agent-identity-object-id}` in the `client_credentials` token request.
+
+### 2d. App Registration — Echo REST API (`agentid-poc-echo-api`)
+
+This is a standard confidential-client/API-only app registration that exposes a scope for the agent to call.
+
+Created in: **Entra admin center → Identity → App registrations → New registration**
+
+| Property | Value |
+|---|---|
+| Display name | `agentid-poc-echo-api` |
+| Type | **App Registration** (Web API) |
+| Expose an API → App ID URI | `api://{echo-api-client-id}` |
+| Expose an API → Scope | `access_as_user` (delegated) |
+| Who can consent | Admins and users |
+| API permissions | None (it is a resource, not a consumer) |
+| Token validation | Validate `aud == {echo-api-client-id}`, `iss == https://login.microsoftonline.com/{tenant-id}/v2.0` |
+
+### 2e. Permission Grant Summary
+
+```
+SPA  ──requests──►  api://{blueprint-client-id}/access_as_user   (user delegates to SPA)
+Agent Identity  ──requests──►  api://{echo-api-client-id}/access_as_user  (admin consent required)
+```
+
+### 2f. Admin Consent Requirements
+
+- `api://{echo-api-client-id}/access_as_user` on the Agent Identity Object requires **tenant admin consent** (or user consent if the scope's `userConsentRequired` is set accordingly).
+- If `InheritDelegatedPermissions=true` on the agent identity, consent granted to the blueprint flows down — but the Echo API permission must still be explicitly added to the agent identity object.
+
+---
+
+## 3. Python Agent Code Pattern
+
+The Entra SDK sidecar has been replaced by **MSAL Python 1.37.0+** running directly
+inside the agent container. There is no sidecar process or localhost HTTP call.
+
+### 3a. Module-level setup
+
+```python
+import msal, boto3, json, os
+
+ENTRA_TENANT_ID    = os.environ["ENTRA_TENANT_ID"]
+BLUEPRINT_CLIENT_ID = os.environ["BLUEPRINT_CLIENT_ID"]
+BLUEPRINT_SECRET_ARN = os.environ["BLUEPRINT_SECRET_ARN"]
+AGENT_IDENTITY_ID  = os.environ["AGENT_IDENTITY_ID"]   # Agent Identity Object ID
+AUTHORITY = "https://login.microsoftonline.com/{}".format(ENTRA_TENANT_ID)
+FMI_SCOPE = ["api://AzureADTokenExchange/.default"]
+
+def _load_blueprint_secret() -> str:
+    sm = boto3.client("secretsmanager")
+    raw = sm.get_secret_value(SecretId=BLUEPRINT_SECRET_ARN)
+    return json.loads(raw["SecretString"])["clientSecret"]
+
+# Long-lived Blueprint CCA — in-memory token cache persists across invocations
+_blueprint_app = msal.ConfidentialClientApplication(
+    BLUEPRINT_CLIENT_ID,
+    client_credential=_load_blueprint_secret(),
+    authority=AUTHORITY,
+)
+```
+
+### 3b. Two-stage token exchange (_get_downstream_token)
+
+```python
+def _get_downstream_token(inbound_user_token: str, scopes: list) -> str:
+    # Stage 1 (FMI / T1): Blueprint CCA impersonates the Agent Identity
+    t1_result = _blueprint_app.acquire_token_for_client(
+        scopes=FMI_SCOPE,
+        fmi_path=AGENT_IDENTITY_ID,
+    )
+    if "access_token" not in t1_result:
+        raise RuntimeError("FMI Stage 1 failed: {}".format(t1_result.get("error")))
+
+    # Stage 2 (OBO / TR): T1 is the client_assertion in the OBO grant
+    obo_app = msal.ConfidentialClientApplication(
+        BLUEPRINT_CLIENT_ID,
+        client_credential={"client_assertion": t1_result["access_token"]},
+        authority=AUTHORITY,
+    )
+    tr_result = obo_app.acquire_token_on_behalf_of(
+        user_assertion=inbound_user_token,
+        scopes=scopes,
+    )
+    if "access_token" not in tr_result:
+        raise RuntimeError("OBO Stage 2 failed: {}".format(tr_result.get("error")))
+    return tr_result["access_token"]
+```
+
+### 3c. call_echo_api tool
+
+```python
+@tool
+def call_echo_api(prompt: str) -> str:
+    """Call the Echo API on behalf of the authenticated user."""
+    inbound_token = _current_token   # set per-invocation, never logged
+    if not inbound_token:
+        return "Error: no authentication token available"
+    try:
+        tr = _get_downstream_token(inbound_token, [ECHO_API_SCOPE])
+        resp = requests.post(
+            "{}/echo".format(ECHO_API_URL),
+            json={"message": prompt},
+            headers={"Authorization": "Bearer {}".format(tr)},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return str(resp.json().get("echo", resp.json()))
+    except Exception as exc:
+        return "Error calling Echo API: {}".format(type(exc).__name__)
+```
+
+### 3d. How the agent accesses the inbound user token
+
+AgentCore passes the original `Authorization: Bearer {Tc}` through to the Python
+agent payload. The agent reads it from the payload dict (keys `"token"`,
+`"authorization"`, or `"access_token"`), strips the `"Bearer "` prefix, and stores
+the raw JWT in a module-level variable for the duration of the invocation. The token
+is cleared in the `finally` block after the invocation completes.
+
+```python
+# The MSAL OBO call requires the raw JWT (no "Bearer " prefix)
+inbound_token = payload.get("token") or payload.get("authorization") or ""
+if inbound_token.lower().startswith("bearer "):
+    inbound_token = inbound_token[7:].strip()
+```
+
+
+---
+
+## 4. Agent Environment Variables
+
+MSAL Python reads all Entra configuration from environment variables. There is no
+sidecar process, no `appsettings.json`, and no `SIDECAR_URL`.
+
+### 4a. Required environment variables
+
+```bash
+# Entra tenant
+ENTRA_TENANT_ID={tenant-id}
+
+# Blueprint app registration client ID
+BLUEPRINT_CLIENT_ID={blueprint-client-id}
+
+# AWS Secrets Manager ARN — secret JSON: {"clientId": "...", "clientSecret": "..."}
+# PoC: client_secret. Production: migrate to certificate credential.
+BLUEPRINT_SECRET_ARN=arn:aws:secretsmanager:{region}:{account}:secret:agentid-poc/blueprint
+
+# Agent Identity Object ID (NOT a client_id — see section 2c)
+AGENT_IDENTITY_ID={agent-identity-object-id}
+
+# Echo API
+ECHO_API_URL=https://{echo-api-host}
+ECHO_API_SCOPE=api://{echo-api-client-id}/access_as_user
+
+# MCP Server (optional)
+MCP_SERVER_URL=https://{mcp-server-host}
+MCP_SERVER_SCOPE=api://{mcp-server-client-id}/access_as_user
+```
+
+### 4b. AWS Secrets Manager secret format
+
+The secret at `BLUEPRINT_SECRET_ARN` must contain a JSON object:
+
+```json
+{
+  "clientId": "{blueprint-client-id}",
+  "clientSecret": "{blueprint-client-secret}"
+}
+```
+
+> PoC only. For production, replace with a certificate credential:
+> ```json
+> {
+>   "clientId": "{blueprint-client-id}",
+>   "private_key_pem": "-----BEGIN RSA PRIVATE KEY-----\n...",
+>   "public_certificate": "-----BEGIN CERTIFICATE-----\n...",
+>   "thumbprint": "{hex-sha1-thumbprint}"
+> }
+> ```
+> Register the certificate under the Blueprint object in Entra admin center
+> (Agents section → Blueprint → Certificates & secrets → Certificates).
+> Update the `ConfidentialClientApplication` constructor to pass the certificate
+> dict instead of the plain string secret.
+
+### 4c. AgentCore container — no sidecar container
+
+There is only one container in the AgentCore task: the Python agent. No sidecar
+container is needed. The agent connects to `login.microsoftonline.com` and to the
+Echo API directly over the public internet via AgentCore's built-in egress.
+
+```json
+{
+  "containerDefinitions": [
+    {
+      "name": "python-agent",
+      "image": "{ecr-repo}/agentid-poc-agent:latest",
+      "environment": [
+        {"name": "ENTRA_TENANT_ID",     "value": "{tenant-id}"},
+        {"name": "BLUEPRINT_CLIENT_ID", "value": "{blueprint-client-id}"},
+        {"name": "AGENT_IDENTITY_ID",   "value": "{agent-identity-object-id}"},
+        {"name": "ECHO_API_URL",        "value": "https://{echo-api-host}"},
+        {"name": "ECHO_API_SCOPE",      "value": "api://{echo-api-client-id}/access_as_user"}
+      ],
+      "secrets": [
+        {
+          "name": "BLUEPRINT_SECRET_ARN",
+          "valueFrom": "arn:aws:secretsmanager:{region}:{account}:secret:agentid-poc/blueprint"
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## 5. Token Flow Diagram (Text)
+
+```
+┌─────────┐  MSAL.js   ┌───────────────────────────────────────────────────┐
+│   SPA   │──────────►│                   Microsoft Entra ID                │
+│(browser)│ auth code  │  tenant: {tenant-id}                               │
+└────┬────┘ + PKCE     └───────────────────────────────────────────────────┘
+     │                        │
+     │  ① GET Tc              │ issues Tc
+     │  scope:                │ (JWT, aud={blueprint-client-id},
+     │  api://{blueprint}/    │  sub=user, scope=access_as_user)
+     │  access_as_user        │
+     │◄───────────────────────┘
+     │
+     │  ② POST {agentcore-endpoint}
+     │  Authorization: Bearer {Tc}
+     ▼
+┌─────────────┐
+│  AgentCore  │  JWT authorizer validates Tc
+│  Runtime    │  (OIDC discovery: login.microsoftonline.com/{tenant}/v2.0)
+│  (AWS)      │  allowedAudience = {blueprint-client-id}
+└──────┬──────┘
+       │  ③ invokes Python agent
+       │  passes Authorization: Bearer {Tc} through
+       ▼
+┌──────────────────┐
+│  Python Agent    │  extracts raw JWT from payload
+│  (AgentCore      │  stores in _current_token (per-invocation)
+│   container)     │  calls _get_downstream_token(Tc, [ECHO_API_SCOPE])
+└────────┬─────────┘
+         │
+         │  ④ Stage 1 (FMI/T1) — MSAL Python in-process
+         │  acquire_token_for_client
+         │  fmi_path={agent-identity-object-id}
+         │  client_credential={secret/cert}
+         ▼
+┌────────────────────────────────────┐
+│          Microsoft Entra ID         │
+│  issues T1 (aud={blueprint-id},    │
+│            sub={agent-identity})   │
+└─────────────────┬──────────────────┘
+                  │
+┌─────────────────▼──────────────────┐
+│  ⑤ Stage 2 (OBO/TR)               │
+│  acquire_token_on_behalf_of        │
+│  client_assertion=T1               │
+│  user_assertion=Tc                 │
+│  scopes=[ECHO_API_SCOPE]           │
+└─────────────────┬──────────────────┘
+                  │
+┌─────────────────▼──────────────────┐
+│          Microsoft Entra ID         │
+│  validates T1.aud==blueprint        │
+│  validates Tc.aud==blueprint        │
+│  issues TR (aud={echo-api-id},     │
+│             sub=user)              │
+└─────────────────┬──────────────────┘
+                  │  TR returned to agent
+┌─────────────────▼──────────────────┐
+│  Python Agent (continued)          │
+│  POST {ECHO_API_URL}/echo          │
+│  Authorization: Bearer {TR}        │
+└─────────────────┬──────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────┐
+│  Echo REST API                      │
+│  validates TR (aud={echo-api-id},   │
+│  sub=user); returns response        │
+└─────────────────────────────────────┘
+```
+
+---
+
+## 6. What the SPA Must Send to AgentCore
+
+### 6a. What scope the SPA requests from Entra
+
+```javascript
+// MSAL.js config (SPA)
+const msalConfig = {
+  auth: {
+    clientId: '{spa-client-id}',
+    authority: 'https://login.microsoftonline.com/{tenant-id}',
+    redirectUri: 'http://localhost:3000',
+  }
+};
+
+// Token acquisition
+const tokenRequest = {
+  scopes: ['api://{blueprint-client-id}/access_as_user'],
+};
+const tokenResponse = await msalInstance.acquireTokenSilent(tokenRequest);
+const userToken = tokenResponse.accessToken;  // This is Tc
+```
+
+The SPA must request **exactly** the delegated scope `api://{blueprint-client-id}/access_as_user`. This causes Entra to issue `Tc` with:
+- `aud = {blueprint-client-id}`  — validated by MSAL OBO in Stage 2
+- `scp = access_as_user`
+- `sub = {user-object-id}`
+
+### 6b. How AgentCore's JWT authorizer validates Tc
+
+AgentCore is configured to point at Entra's OIDC discovery endpoint:
+
+```yaml
+# AgentCore JWT authorizer configuration (CloudFormation)
+authorizerConfiguration:
+  customJWTAuthorizer:
+    discoveryUrl: https://login.microsoftonline.com/{tenant-id}/v2.0/.well-known/openid-configuration
+    allowedAudience:
+      - {blueprint-client-id}
+      - api://{blueprint-client-id}
+    allowedScopes:
+      - access_agent
+```
+
+The authorizer validates exactly three things:
+- `iss` — the issuer, validated automatically via the OIDC `discoveryUrl` (no extra config).
+- `aud` — must equal the Blueprint client ID (`AgentCoreAppClientId`).
+- `scp` — must contain `access_agent` (the delegated scope), via `allowedScopes`.
+
+It no longer validates the calling client (`azp` / `allowedClients`). AgentCore fetches Entra's JWKS, validates the signature, and validates expiry. **It does not do a token exchange** — it simply gate-keeps the request. The raw `Tc` is passed through to the agent.
+
+### 6c. How the Python agent accesses the inbound user token
+
+AgentCore passes the inbound token through to the Python agent payload. The agent
+reads it from the payload dict, strips the `"Bearer "` prefix, and passes the raw
+JWT to `_get_downstream_token` as `inbound_user_token`:
+
+```python
+# agent.py — extract raw JWT from AgentCore payload
+inbound_token = payload.get("token") or payload.get("authorization") or ""
+if inbound_token.lower().startswith("bearer "):
+    inbound_token = inbound_token[7:].strip()
+# inbound_token is now the raw JWT — ready for acquire_token_on_behalf_of
+```
+
+### 6d. Does AgentCore pass the raw Bearer token or a claims object?
+
+**AgentCore passes the raw Bearer token** (`Authorization: Bearer {Tc}`) to the agent
+payload. It does NOT decode it into a claims object. MSAL Python's
+`acquire_token_on_behalf_of` expects the raw JWT string (no `"Bearer "` prefix) as
+the `user_assertion` parameter.
+
+---
+
+## Appendix: Placeholder Reference
+
+| Placeholder | Description | Where used |
+|---|---|---|
+| `{tenant-id}` | Entra tenant GUID | `ENTRA_TENANT_ID` env var, AgentCore discoveryUrl, MSAL authority |
+| `{blueprint-client-id}` | Client ID of the Blueprint (Agents section) | `BLUEPRINT_CLIENT_ID` env var, OBO `client_id`, audience of Tc and T1 |
+| `{blueprint-client-secret}` | PoC credential for the Blueprint | AWS Secrets Manager secret (`clientSecret` key) |
+| `{agent-identity-object-id}` | Object ID of the Agent Identity Object (NOT a client_id) | `AGENT_IDENTITY_ID` env var, `fmi_path` in Stage 1 token request |
+| `{echo-api-client-id}` | Client ID of the Echo REST API app registration | `ECHO_API_SCOPE` env var, agent identity permission |
+| `{echo-api-host}` | Hostname of the Echo REST API | `ECHO_API_URL` env var |
+| `{mcp-server-client-id}` | Client ID of MCP server app registration (if needed) | `MCP_SERVER_SCOPE` env var |
+| `{spa-client-id}` | Client ID of the SPA app registration | MSAL.js config |
+| `{agentcore-endpoint}` | AWS AgentCore Runtime invoke URL | SPA HTTP calls |
+
+> ⚠️ **Important:** The Agent Identity Object (`agentid-poc-identity`) does **NOT** have a `client_id`. It only has an `{agent-identity-object-id}` (Object ID). Any reference to `{agent-identity-client-id}` in older drafts of this spec was incorrect and has been removed.
+
+> ⚠️ **PoC vs Production credential:** The Blueprint currently uses a `clientSecret` stored in AWS Secrets Manager. For production, migrate to a certificate credential (PEM private key + certificate chain + thumbprint) and register the certificate under the Blueprint object in Entra admin center (Agents section). Update the `ConfidentialClientApplication` constructor to pass the certificate dict instead of the plain string secret. A client_secret cannot satisfy SNI/x5c requirements in hardened Entra tenants.

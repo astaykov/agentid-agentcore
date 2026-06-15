@@ -1,0 +1,59 @@
+# ── Secrets & credentials ──────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.pfx
+*.p12
+secrets.json
+credentials.json
+
+# ── AWS ────────────────────────────────────────────────────────────────────
+.aws/
+.aws-state/
+aws-exports.js
+
+# ── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+*.egg
+
+# ── Node / SPA ─────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+spa/msal-config.js     # contains real client IDs — use msal-config.js.sample as template
+
+# ── Docker ─────────────────────────────────────────────────────────────────
+.docker/
+
+# ── Editor / OS ────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/settings.json
+
+# ── Copilot artifacts ───────────────────────────────────────────────────────
+.playwright-mcp/
+
+# ── Squad: runtime state (logs, inbox, sessions) ───────────────────────────
+.squad/orchestration-log/
+.squad/log/
+.squad/decisions/inbox/
+.squad/sessions/
+.squad/.scratch/
+.squad-workstream
+.squad/.cache/
+
+# ── Response files from invoke.ps1 ─────────────────────────────────────────
+response.json
