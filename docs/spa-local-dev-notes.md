@@ -1,9 +1,5 @@
 # SPA Local Dev Notes
 
-_Reviewed by: Hockney (Frontend) — 2026-06-09_
-
----
-
 ## What does the SPA call?
 
 **AgentCore only.** The SPA sends every message to `agentCoreEndpoint` (a single `POST` with

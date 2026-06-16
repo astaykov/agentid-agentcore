@@ -1,33 +1,31 @@
 # Deployment Guide — Entra Agent ID + AWS AgentCore PoC
 
-**Author:** Keyser (Lead Architect)  
-**Date:** 2026-06-08  
 **Audience:** Engineers deploying the PoC. Assumes Entra artefacts already created.
 
 ---
 
 ## Prerequisites
 
-### What you need from Entra (already created)
+## What you need from Entra (already created)
 
 Collect these values from the Entra admin center before starting:
 
 | Value | Where to find it |
 |---|---|
 | **Tenant ID** | Entra admin center → Overview → Tenant ID |
-| **Blueprint Client ID** | Entra admin center → Agents → Blueprints → *{your blueprint}* → Application (client) ID |
-| **Blueprint Client Secret** | Value you noted when you created the secret (not visible after creation) |
+| **Blueprint Client ID** | Entra admin center → Agents → Agent Blueprints → *{your blueprint}* → Blueprint App ID |
+| **Blueprint Client Secret** | Value you noted when you created the secret (not visible after creation). Entra admin center → Agents → Agent Blueprints → *{your blueprint}* → Credentials |
 | **Agent Identity Object ID** | Entra admin center → Agents → Agent identities → *{your identity}* → Object ID. This is the `fmi_path` / `AGENT_IDENTITY_ID` value. |
-| **SPA Client ID** | Entra admin center → Applications → App registrations → *agentid-poc-spa* → Application (client) ID |
+| **SPA Client ID** | Entra admin center → App registrations → *agentid-poc-spa* → Application (client) ID |
 | **Blueprint App ID URI** | `api://{blueprint-client-id}` — the audience the SPA requests when acquiring a token |
-| **Echo API Client ID** | Entra admin center → Applications → App registrations → *agentid-poc-echo-api* → Application (client) ID |
+| **Echo API Client ID** | Entra admin center → App registrations → *agentid-poc-echo-api* → Application (client) ID |
 
 ### What you need locally
 
 - AWS CLI v2 installed and configured (`aws configure` or a named profile)
 - PowerShell 7+ — verify: `pwsh --version`
 - Docker Desktop (for local SPA serving and echo API testing)
-- Git
+- Git (optional, to clone this repository)
 
 ---
 
@@ -89,17 +87,7 @@ The stack is deployed via `deploy.ps1`, which uses change sets and is **safe to 
 
 **Resources provisioned:**
 
-- VPC with public subnet (NAT Gateway + Internet Gateway) and two private subnets
-- ECS Fargate cluster with the Entra SDK sidecar service (ECS Service Connect on port 5000)
-- IAM roles for the sidecar task, sidecar execution, and AgentCore runtime
-- ECR repository for the agent container image (`{stack-name}-agent`)
-
-> **Why no `AWS::BedrockAgentCore::AgentRuntime` in the CFN stack?**
-> `AWS::BedrockAgentCore::AgentRuntime` is not yet a supported CloudFormation resource type
-> (confirmed: `aws cloudformation list-types` returns no results for `AWS::BedrockAgentCore` in any region).
-> The runtime is provisioned separately via `create-runtime.ps1` (Step 2b below).
-
-**First deploy takes ~5–8 minutes** (NAT Gateway provisioning dominates).
+**First deploy takes ~1–2 minutes**
 
 **Check progress at any time:**
 
@@ -110,32 +98,6 @@ aws cloudformation describe-stacks `
 ```
 
 ---
-
-## Step 2b: Create the AgentCore Runtime
-
-`AWS::BedrockAgentCore::AgentRuntime` does not exist as a CloudFormation type, so the runtime is created via `create-runtime.ps1` using the `bedrock-agentcore-control` CLI directly.
-
-**The script will:**
-1. Check that the runtime doesn't already exist (idempotent).
-2. Read VPC/IAM outputs from the CloudFormation stack.
-3. Build the agent Docker image from `agent/Dockerfile` and push it to the ECR repository.
-4. Create the AgentCore Runtime with the Entra JWT authorizer.
-
-```powershell
-
-.\create-runtime.ps1 `
-    -EntraTenantId    "YOUR_TENANT_ID" `
-    -BlueprintClientId "YOUR_BLUEPRINT_CLIENT_ID" `
-    -AgentIdentityId  "YOUR_AGENT_IDENTITY_OBJECT_ID"
-```
-
-> **Optional parameters:**
-> - `-StackName` — default: `agentid-poc`
-> - `-Region` — default: `eu-central-1`
-> - `-AwsProfile` — default: `agentid-poc`
-> - `-AgentModelId` — default: `eu.amazon.nova-micro-v1:0` (injected as `BEDROCK_MODEL_ID` env var)
-> - `-AgentContainerUri` — pre-built ECR URI; omit to auto-build from `agent/Dockerfile`
-> - `-SkipBuild` — skip Docker build (requires `-AgentContainerUri`)
 
 **Prerequisite:** Docker Desktop must be running (needed for the container build).
 
@@ -201,34 +163,7 @@ const agentCoreEndpoint = "https://bedrock-agentcore.YOUR_REGION.amazonaws.com";
 
 ---
 
-## Step 5: Smoke test — CLI invocation (no Entra token)
-
-Verify the stack is functional before testing the full OBO flow:
-
-```powershell
-
-.\scripts\aws-invoke.ps1 -Prompt "Hello, what can you do?"
-```
-
-`invoke.ps1` automatically looks up the AgentCore Runtime by name via `bedrock-agentcore-control list-agent-runtimes`, discovers the first READY endpoint qualifier, and calls `bedrock-agentcore invoke-agent-runtime`.
-
-**Expected outcome:** A `response.json` file is written and its contents are printed to the console. A JSON response like `{"status":"success","response":"..."}` confirms the AgentCore runtime is running and reachable.
-
-**Optional parameters:**
-
-```powershell
-.\scripts\aws-invoke.ps1 `
-    -RuntimeName  "agentid-poc" `     # default: matches -StackName
-    -StackName    "agentid-poc" `     # default: agentid-poc
-    -Region       "eu-central-1" `   # default: eu-central-1
-    -AwsProfile   "agentid-poc" `    # default: agentid-poc
-    -Prompt       "Your prompt here" `
-    -ResponsePath "response.json"    # default: response.json
-```
-
----
-
-## Step 6: Full OBO flow test — with Entra token
+## Step 5: Full OBO flow test — with Entra token
 
 This tests the complete Entra Agent ID OBO flow: SPA → AgentCore → sidecar → Echo API.
 
@@ -243,24 +178,6 @@ docker run --rm -p 3000:80 -v "${PWD}/spa:/usr/share/nginx/html:ro" nginx:alpine
 2. Sign in with an Entra account that has consent for `api://{blueprint-client-id}/access_as_user`.
 3. Type a message and click **Send**.
 4. The response body from the Echo API is displayed — this confirms the full OBO chain completed.
-
-### Option B — PowerShell (no browser required)
-
-Use the Azure CLI to acquire a token via the device code flow, then pass it to `invoke.ps1`:
-
-```powershell
-# Acquire a delegated access token for the Blueprint's scope
-$token = az account get-access-token `
-    --resource "api://YOUR_BLUEPRINT_CLIENT_ID" `
-    --query accessToken --output tsv
-
-# Invoke AgentCore with the Entra token (full OBO flow)
-.\scripts\aws-invoke.ps1 `
-    -Prompt     "Echo: hello from CLI" `
-    -EntraToken "Bearer $token"
-```
-
-The `-EntraToken` value is included in the payload JSON sent to the Python agent. The agent extracts it and passes it to the sidecar's `/AuthorizationHeader/EchoAPI` endpoint to trigger the OBO exchange.
 
 ---
 
@@ -280,9 +197,6 @@ docker run --rm -p 8080:8080 `
     -e ECHO_API_CLIENT_ID=$env:ECHO_API_CLIENT_ID `
     agentid-echo-api
 ```
-
-> **Reaching the local Echo API from the sidecar:** The Fargate sidecar runs inside the VPC and cannot reach `localhost` on your workstation. For full cloud end-to-end testing, deploy the echo API to a public endpoint (AWS App Runner, ECS, or Azure Container Apps) and redeploy the stack with the updated `-EchoApiScope` pointing at that deployment. The sidecar reads the Echo API base URL from the `DownstreamApis__EchoAPI__BaseUrl` environment variable injected at task definition creation time.
-
 ---
 
 ## Teardown
@@ -304,8 +218,6 @@ aws secretsmanager delete-secret `
     --secret-id "agentid-poc/blueprint-credentials" `
     --force-delete-without-recovery
 ```
-
-> **Cost note:** The NAT Gateway and ECS Fargate tasks are the primary ongoing costs. Delete the stack when not in use.
 
 ---
 
