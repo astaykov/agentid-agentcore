@@ -1,15 +1,13 @@
 """
 AgentCore Agent - Entra Agent ID PoC
-Uses MSAL Python FIC/FMI directly for Entra Agent ID OBO token acquisition.
+Uses an AWS IAM web identity token as the Blueprint federated credential, then
+MSAL Python for the Entra Agent ID FMI/OBO token exchange.
 Token NEVER passed to LLM.
-
-PoC note: Blueprint credential uses client_secret. Migrate to certificate
-(SNI/x5c) for production - client_secret cannot satisfy FMI SNI requirements
-in a hardened Entra tenant policy.
 """
 import os
 import json
 import base64
+import binascii
 import logging
 import threading
 import requests
@@ -59,7 +57,7 @@ class TokenAcquisitionError(Exception):
 
     Distinct from generic errors so callers can tell an AUTH failure apart from
     optional-MCP transport/wiring problems: a token failure is surfaced to the
-    end user verbatim (demo requirement), whereas an MCP transport failure stays
+    end user verbatim (for demo purposes), whereas an MCP transport failure stays
     on the non-fatal graceful-fallback path. Messages carry the non-secret MSAL
     error/error_description (e.g. AADSTS codes) ONLY - never a token or signature.
     """
@@ -69,16 +67,20 @@ class TokenAcquisitionError(Exception):
 # Environment variables (all required unless noted)
 # ---------------------------------------------------------------------------
 ENTRA_TENANT_ID = os.environ["ENTRA_TENANT_ID"]
-BLUEPRINT_SECRET_ARN = os.environ["BLUEPRINT_SECRET_ARN"]
+BLUEPRINT_CLIENT_ID = os.environ["BLUEPRINT_CLIENT_ID"]
 AGENT_IDENTITY_ID = os.environ["AGENT_IDENTITY_ID"]
 ECHO_API_URL = os.environ["ECHO_API_URL"]
 ECHO_API_SCOPE = os.environ.get("ECHO_API_SCOPE", "api://echo-api/access_as_user")
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "")
 MCP_SERVER_SCOPE = os.environ.get("MCP_SERVER_SCOPE", "")
 DEFAULT_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "eu.amazon.nova-micro-v1:0")
+AUTH_DIAGNOSTICS_ENABLED = os.environ.get(
+    "AUTH_DIAGNOSTICS_ENABLED", "false"
+).lower() in {"1", "true", "yes"}
 
 AUTHORITY = "https://login.microsoftonline.com/{}".format(ENTRA_TENANT_ID)
 FMI_SCOPE = ["api://AzureADTokenExchange/.default"]
+FIC_AUDIENCE = "api://AzureADTokenExchange"
 
 app = BedrockAgentCoreApp()
 print("app.py: BedrockAgentCoreApp created", flush=True)
@@ -86,58 +88,107 @@ print("app.py: BedrockAgentCoreApp created", flush=True)
 # ---------------------------------------------------------------------------
 # Blueprint ConfidentialClientApplication - lazy-initialized on first call.
 # Loaded once per process so the in-memory token cache persists across
-# invocations. Secrets Manager is NOT called at import time to avoid blocking
-# the 30s AgentCore init window.
+# invocations. MSAL calls its assertion provider only for a token-endpoint
+# request; constructing the CCA does not mint nor cache the AWS assertion.
 # ---------------------------------------------------------------------------
+_sts_lock = threading.Lock()
+_sts_client: Any | None = None
 _blueprint_lock = threading.Lock()
 _blueprint_app: msal.ConfidentialClientApplication | None = None
-_blueprint_client_id: str = ""
 
 
-def _load_blueprint_secret() -> tuple[str, str]:
+def _ensure_sts_client() -> Any:
+    """Return a regional STS client, creating it only when an assertion is needed."""
+    global _sts_client
+    if _sts_client is not None:
+        return _sts_client
+    with _sts_lock:
+        if _sts_client is None:
+            region = os.environ.get("AWS_REGION") or os.environ["AWS_DEFAULT_REGION"]
+            _sts_client = boto3.client(
+                "sts",
+                region_name=region,
+                config=BotocoreConfig(
+                    connect_timeout=5,
+                    read_timeout=10,
+                    retries={"mode": "standard", "max_attempts": 3},
+                ),
+            )
+    return _sts_client
+
+
+def _get_blueprint_assertion(*args, **kwargs) -> str:
     """
-    Fetch Blueprint credentials from Secrets Manager.
-    Expected secret JSON: {"clientId": "...", "clientSecret": "..."}
-    Returns (clientId, clientSecret) - never logged or stored beyond this call.
-    Region is derived from the ARN when possible, so the secret can live in any
-    region (e.g., us-east-1) regardless of where the runtime is deployed.
+    Acquire a fresh AWS assertion when MSAL needs to call the Entra token endpoint.
+
+    The assertion is deliberately not cached here. MSAL caches the resulting Entra
+    token and invokes this delegate again when a new token-endpoint request requires
+    a new client assertion.
     """
-    # Prefer the region embedded in the ARN (arn:aws:sm:{region}:{acct}:secret:{name})
-    parts = BLUEPRINT_SECRET_ARN.split(":")
-    region = (
-        parts[3]
-        if len(parts) >= 4 and parts[3]
-        else (os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "eu-central-1"))
+    response = _ensure_sts_client().get_web_identity_token(
+        Audience=[FIC_AUDIENCE],
+        SigningAlgorithm="RS256",
+        DurationSeconds=300,
     )
-    logger.info("Loading blueprint secret from region %s", region)
-    sm = boto3.client(
-        "secretsmanager",
-        region_name=region,
-        config=BotocoreConfig(connect_timeout=5, read_timeout=10),
-    )
-    raw = sm.get_secret_value(SecretId=BLUEPRINT_SECRET_ARN)
-    secret = json.loads(raw["SecretString"])
-    return secret["clientId"], secret["clientSecret"]
+    assertion = response["WebIdentityToken"]
+    if AUTH_DIAGNOSTICS_ENABLED:
+        try:
+            header_segment, payload_segment, _ = assertion.split(".", 2)
+            header = json.loads(
+                base64.urlsafe_b64decode(
+                    header_segment + "=" * (-len(header_segment) % 4)
+                )
+            )
+            claims = json.loads(
+                base64.urlsafe_b64decode(
+                    payload_segment + "=" * (-len(payload_segment) % 4)
+                )
+            )
+            issued_at = claims.get("iat")
+            expires_at = claims.get("exp")
+            lifetime = (
+                expires_at - issued_at
+                if isinstance(issued_at, int) and isinstance(expires_at, int)
+                else None
+            )
+            logger.info(
+                "AWS assertion metadata: alg=%s kid=%s typ=%s iss=%s sub=%s "
+                "aud=%s iat=%s exp=%s lifetime_seconds=%s jti=%s",
+                header.get("alg"),
+                header.get("kid"),
+                header.get("typ"),
+                claims.get("iss"),
+                claims.get("sub"),
+                claims.get("aud"),
+                issued_at,
+                expires_at,
+                lifetime,
+                claims.get("jti"),
+            )
+        except (ValueError, TypeError, json.JSONDecodeError, binascii.Error):
+            logger.warning("AWS assertion metadata could not be decoded")
+    return assertion
 
 
-def _ensure_blueprint_app() -> tuple["msal.ConfidentialClientApplication", str]:
-    """Return (blueprint_app, client_id), initializing lazily on first call."""
-    global _blueprint_app, _blueprint_client_id
+def _ensure_blueprint_app() -> "msal.ConfidentialClientApplication":
+    """Return the Blueprint CCA, initializing it lazily on first call."""
+    global _blueprint_app
     if _blueprint_app is not None:
-        return _blueprint_app, _blueprint_client_id
+        return _blueprint_app
     with _blueprint_lock:
         if _blueprint_app is not None:
-            return _blueprint_app, _blueprint_client_id
-        client_id, client_secret = _load_blueprint_secret()
-        _blueprint_client_id = client_id
+            return _blueprint_app
+
         _blueprint_app = msal.ConfidentialClientApplication(
-            client_id,
-            client_credential=client_secret,
+            BLUEPRINT_CLIENT_ID,
+            client_credential={"client_assertion": _get_blueprint_assertion},
             authority=AUTHORITY,
         )
-        del client_secret
-        logger.info("Blueprint MSAL app initialised for client %s", client_id[:8] + "...")
-    return _blueprint_app, _blueprint_client_id
+        logger.info(
+            "Blueprint MSAL app initialised for client %s",
+            BLUEPRINT_CLIENT_ID[:8] + "...",
+        )
+    return _blueprint_app
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +236,7 @@ def _ensure_agent_app() -> "msal.ConfidentialClientApplication":
             # impersonation assertion proving the blueprint->agent-identity
             # relationship. T1 is cached by _blueprint_app per fmi_path; this
             # callable is only reached when MSAL needs a fresh assertion.
-            blueprint_app, _ = _ensure_blueprint_app()
+            blueprint_app = _ensure_blueprint_app()
             t1_result = blueprint_app.acquire_token_for_client(
                 scopes=FMI_SCOPE,
                 fmi_path=AGENT_IDENTITY_ID,

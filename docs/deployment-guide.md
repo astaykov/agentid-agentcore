@@ -14,7 +14,6 @@ Collect these values from the Entra admin center before starting:
 |---|---|
 | **Tenant ID** | Entra admin center → Overview → Tenant ID |
 | **Blueprint Client ID** | Entra admin center → Agents → Agent Blueprints → *{your blueprint}* → Blueprint App ID |
-| **Blueprint Client Secret** | Value you noted when you created the secret (not visible after creation). Entra admin center → Agents → Agent Blueprints → *{your blueprint}* → Credentials |
 | **Agent Identity Object ID** | Entra admin center → Agents → Agent identities → *{your identity}* → Object ID. This is the `fmi_path` / `AGENT_IDENTITY_ID` value. |
 | **SPA Client ID** | Entra admin center → App registrations → *agentid-poc-spa* → Application (client) ID |
 | **Blueprint App ID URI** | `api://{blueprint-client-id}` — the audience the SPA requests when acquiring a token |
@@ -29,27 +28,26 @@ Collect these values from the Entra admin center before starting:
 
 ---
 
-## Step 1: Store Blueprint credentials in AWS Secrets Manager
+## Step 1: Enable AWS outbound identity federation
 
-This is the **only manual AWS step** — run it once before deploying the stack.
-The stack references this secret by ARN rather than accepting the plaintext secret as a parameter.
+This account-level setting has no native CloudFormation resource. Enable it once with
+the AWS CLI. The operator needs `iam:EnableOutboundWebIdentityFederation` and
+`iam:GetOutboundWebIdentityFederationInfo`:
 
 ```powershell
-# Build the secret JSON and create the secret
-$secretValue = (@{
-    clientId     = "YOUR_BLUEPRINT_CLIENT_ID"
-    clientSecret = "YOUR_BLUEPRINT_CLIENT_SECRET"
-} | ConvertTo-Json -Compress)
+aws iam enable-outbound-web-identity-federation --profile agentid-poc
 
-$secretArn = aws secretsmanager create-secret `
-    --name        "agentid-poc/blueprint-credentials" `
-    --description "Entra Agent ID Blueprint credentials for AgentCore PoC" `
-    --secret-string $secretValue `
-    --query "ARN" --output text
-
-Write-Host "Secret ARN: $secretArn"
-# SAVE THIS ARN — you need it for the -BlueprintSecretArn parameter in Step 2
+aws iam get-outbound-web-identity-federation-info `
+    --profile agentid-poc `
+    --query IssuerIdentifier `
+    --output text
 ```
+
+If federation is already enabled, the enable command returns `FeatureEnabled`. This is
+safe to ignore; the get command returns the existing issuer URL.
+
+Alternatively, open **AWS IAM → Access management → Account settings → Outbound
+identity federation**, select **Enable**, and copy the token issuer URL.
 
 ---
 
@@ -63,19 +61,25 @@ The stack is deployed via `deploy.ps1`, which uses change sets and is **safe to 
 
 .\scripts\aws-deploy.ps1 `
     -EntraTenantId      "YOUR_TENANT_ID" `
-    -BlueprintClientId  "YOUR_BLUEPRINT_CLIENT_ID" `
-    -BlueprintSecretArn "arn:aws:secretsmanager:REGION:ACCOUNT:secret:agentid-poc/blueprint-credentials-SUFFIX" `
+    -AgentIdentityId    "YOUR_AGENT_IDENTITY_OBJECT_ID" `
+    -AgentCoreAppClientId "YOUR_BLUEPRINT_CLIENT_ID" `
+    -AgentCoreAllowedScope "agent.invoke" `
+    -EchoApiClientId    "YOUR_ECHO_API_CLIENT_ID" `
     -McpServerUrl       "https://your-mcp-server.example.com" `
     -McpServerScope     "api://your-mcp-scope/.default" `
     -EchoApiScope       "api://YOUR_ECHO_API_CLIENT_ID/access_as_user" `
-    -AgentModelId       "amazon.nova-micro-v1:0"
+    -BedrockModelId     "amazon.nova-micro-v1:0"
 ```
 
 > **Optional parameters with defaults:**
 > - `-StackName` — default: `agentid-poc`
 > - `-Region` — default: `eu-central-1`
 > - `-EchoApiScope` — default: `api://echo-api-client-id/access_as_user` (override with your actual Echo API client ID)
-> - `-AgentModelId` — default: `amazon.nova-micro-v1:0`
+> - `-BedrockModelId` — default: `eu.amazon.nova-micro-v1:0`
+> - `-AgentCoreAllowedScope` — default: `agent.invoke`; set this to the exact
+>   value in the inbound JWT's `scp` claim, for example `agent.invoke`.
+> - `-EnableAuthDiagnostics` — logs non-secret AWS assertion header/claim metadata;
+>   never logs the raw assertion. Use only while troubleshooting.
 
 **What the script does:**
 
@@ -101,6 +105,16 @@ aws cloudformation describe-stacks `
 
 **Prerequisite:** Docker Desktop must be running (needed for the container build).
 
+On WSL/Ubuntu, build the deployment ZIP directly without Docker:
+
+```bash
+./scripts/build-zip.sh
+```
+
+The script selects Python 3.12 ARM64 wheels, disables bytecode compilation, removes
+all `__pycache__`, `.pyc`, and `.pyo` files, and writes
+`build/agent-runtime.zip`. Deploy it from PowerShell with `-SkipZipBuild`.
+
 **The runtime takes 2–3 minutes to reach READY status** after creation. Poll status:
 
 ```powershell
@@ -110,7 +124,7 @@ aws bedrock-agentcore-control get-agent-runtime `
 
 ---
 
-## Step 3: Collect stack outputs
+## Step 3: Configure the Blueprint federated identity credential
 
 After the stack reaches `CREATE_COMPLETE` or `UPDATE_COMPLETE`:
 
@@ -122,22 +136,38 @@ $outputs = aws cloudformation describe-stacks `
 $outputs | Format-Table OutputKey, OutputValue
 ```
 
-Note these values:
-
-| Output Key | What it is | Used in |
-|---|---|---|
-| `AgentCoreExecutionRoleArn` | IAM role ARN for AgentCore Runtime | `create-runtime.ps1` (auto-read) |
-| `AgentECRRepositoryUri` | ECR repo URI for the agent container | `create-runtime.ps1` (auto-read) |
-| `AgentRuntimeEndpoint` | Invocation base URL (`https://bedrock-agentcore.{region}.amazonaws.com`) | `msal-config.js` |
-| `SidecarServiceArn` | ARN of the Fargate Entra SDK sidecar ECS service | Reference / troubleshooting |
-| `VpcId` | VPC ID | Reference only |
-
-The AgentCore Runtime ARN and ID are shown by `create-runtime.ps1` on successful creation. To retrieve them later:
+Retrieve the AWS values used by the Blueprint FIC:
 
 ```powershell
-aws bedrock-agentcore-control list-agent-runtimes `
-    --region eu-central-1 --profile agentid-poc
+$issuer = aws iam get-outbound-web-identity-federation-info `
+    --profile agentid-poc `
+    --query IssuerIdentifier `
+    --output text
+
+$subject = aws cloudformation describe-stacks `
+    --stack-name agentid-poc `
+    --profile agentid-poc `
+    --query "Stacks[0].Outputs[?OutputKey=='ExecutionRoleArn'].OutputValue | [0]" `
+    --output text
 ```
+
+In the Entra admin center, open the Blueprint's management page, select **Credentials**
+under **Developer settings**, open **Federated credentials**, and select **Add
+credential → Other issuer**. Enter:
+
+| Field | Exact value |
+|---|---|
+| Name | `aws-agentcore-runtime` |
+| Issuer | `$issuer` |
+| Subject | `$subject` |
+| Audience | `api://AzureADTokenExchange` |
+
+Issuer, subject, and audience matching is case-sensitive. Use the `ExecutionRoleArn`
+stack output unchanged. Do not use the STS assumed-role session ARN, runtime ARN, or
+Agent Identity Object ID as the subject.
+
+The role name includes the stack name. If you deploy under a different stack name or
+replace the role, update the FIC subject.
 
 ---
 
@@ -155,17 +185,17 @@ const msalConfig = {
   cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false }
 };
 
-const agentCoreScopes = ["api://YOUR_BLUEPRINT_CLIENT_ID/access_as_user"];
+const agentCoreScopes = ["api://YOUR_BLUEPRINT_CLIENT_ID/agent.invoke"];
 const agentCoreEndpoint = "https://bedrock-agentcore.YOUR_REGION.amazonaws.com"; // AgentRuntimeEndpoint from Step 3
 ```
 
-**How it works:** The SPA acquires an Entra access token scoped to `api://{blueprint-client-id}/access_as_user` and sends it as `Authorization: Bearer {token}` in the request to AgentCore. AgentCore's JWT authorizer validates the token against the Entra OIDC discovery endpoint (`iss`), the allowed audience (`aud` = `AgentCoreAppClientId`), and the allowed scope (`scp` = `access_agent`). The Python agent then uses the token to call the sidecar for an OBO exchange.
+**How it works:** The SPA acquires an Entra access token scoped to `api://{blueprint-client-id}/agent.invoke` and sends it as `Authorization: Bearer {token}` in the request to AgentCore. AgentCore's JWT authorizer validates the token against the Entra OIDC discovery endpoint (`iss`), the allowed audience (`aud` = `AgentCoreAppClientId`), and the allowed scope (`scp` = `agent.invoke`). The Python agent obtains an AWS-signed assertion from regional STS, authenticates the Blueprint through its FIC, and performs the FMI/OBO exchange.
 
 ---
 
 ## Step 5: Full OBO flow test — with Entra token
 
-This tests the complete Entra Agent ID OBO flow: SPA → AgentCore → sidecar → Echo API.
+This tests the complete Entra Agent ID OBO flow: SPA → AgentCore → Entra → Echo API.
 
 ### Option A — SPA in browser (recommended)
 
@@ -175,7 +205,7 @@ docker run --rm -p 3000:80 -v "${PWD}/spa:/usr/share/nginx/html:ro" nginx:alpine
 ```
 
 1. Open `http://localhost:3000` in a browser.
-2. Sign in with an Entra account that has consent for `api://{blueprint-client-id}/access_as_user`.
+2. Sign in with an Entra account that has consent for `api://{blueprint-client-id}/agent.invoke`.
 3. Type a message and click **Send**.
 4. The response body from the Echo API is displayed — this confirms the full OBO chain completed.
 
@@ -183,7 +213,7 @@ docker run --rm -p 3000:80 -v "${PWD}/spa:/usr/share/nginx/html:ro" nginx:alpine
 
 ## Step 7: Deploy the Echo REST API (optional)
 
-The Echo API validates the downstream OBO token issued by the sidecar. For quick local testing, run it with Docker:
+The Echo API validates the downstream OBO token issued by Entra. For quick local testing, run it with Docker:
 
 ```powershell
 cd echo-api
@@ -211,25 +241,15 @@ docker run --rm -p 8080:8080 `
 .\scripts\aws-destroy.ps1 -SkipRuntimeDelete
 ```
 
-To also delete the Blueprint credentials secret:
-
-```powershell
-aws secretsmanager delete-secret `
-    --secret-id "agentid-poc/blueprint-credentials" `
-    --force-delete-without-recovery
-```
-
----
-
 ## Troubleshooting
 
 | Symptom | Diagnosis & Fix |
 |---|---|
 | Stack stuck in `ROLLBACK_COMPLETE` | `deploy.ps1` handles this automatically on re-run. To inspect what failed: `aws cloudformation describe-stack-events --stack-name agentid-poc --query "StackEvents[?ResourceStatus=='CREATE_FAILED']"` |
-| `401 Unauthorized` from AgentCore | Verify the `EntraTenantId` and `AgentCoreAppClientId` match the issuer and audience in the token. The JWT authorizer checks `iss` against the OIDC discovery URL, `aud` against `AgentCoreAppClientId`, and `scp` against `access_agent`. |
+| JSON-RPC `Authorization denied` / HTTP 403 from AgentCore | The request was rejected before the container ran. Verify `iss`, `aud`, and `scp`. Set `AGENTCORE_ALLOWED_SCOPE` to the exact scope value in `scp` (for example `agent.invoke`), not the full scope URI. Then redeploy. |
 | `No READY endpoints found` from `invoke.ps1` | The AgentCore Runtime may still be initialising. Wait 2–3 minutes after creation and retry. Check runtime status: `aws bedrock-agentcore-control list-agent-runtimes --region eu-central-1 --profile agentid-poc` |
 | `Runtime 'agentid-poc' not found` from `invoke.ps1` | Run `create-runtime.ps1` first. |
-| Sidecar health check failing (ECS service unstable) | Check sidecar logs in CloudWatch: log group `/ecs/agentid-poc/entra-sidecar`. Common causes: `AGENT_IDENTITY_ID` env var not set, Blueprint secret ARN wrong, or Blueprint client ID mismatch. |
+| `OutboundWebIdentityFederationDisabled` | Enable the account setting in Step 1. It is deliberately not managed by the CloudFormation stack. |
+| `AADSTS70021` / no matching federated identity record | Verify that the FIC issuer equals the account issuer, its subject exactly equals the stack's `ExecutionRoleArn`, and its audience is `api://AzureADTokenExchange`. Allow several minutes after creating or updating the FIC. |
+| Need to inspect the AWS assertion | Redeploy with `-EnableAuthDiagnostics`, invoke the agent, and find `AWS assertion metadata` in the runtime's CloudWatch logs. Compare `iss`, `sub`, and `aud` with the FIC. The raw JWT is intentionally never logged. Redeploy without the switch afterward. |
 | OBO exchange fails with `invalid_grant` | Ensure the Agent Identity is correctly linked to the Blueprint in Entra admin center (Agents → Agent identities). The `fmi_path` (Agent Identity Object ID) must be the Object ID of the Agent Identity child object, not a client ID. |
-| Docker image pull fails for sidecar | `mcr.microsoft.com/entra-sdk/auth-sidecar` requires public internet access. Confirm the NAT Gateway is healthy and the private subnet route table routes `0.0.0.0/0` to the NAT Gateway. |
-| `EmptyOnDelete` error during stack teardown | If your AWS region doesn't support `EmptyOnDelete` on ECR repositories, manually delete all images first: `aws ecr batch-delete-image --repository-name agentid-poc-agent --image-ids $(aws ecr list-images --repository-name agentid-poc-agent --query 'imageIds' --output json)` |
