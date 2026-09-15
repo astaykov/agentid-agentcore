@@ -29,14 +29,14 @@ flowchart TD
 
     subgraph Entra["Microsoft Entra ID"]
         IDP["Token issuance<br/>OIDC / OAuth2"]
-        BP["Agent Identity Blueprint<br/>(app reg + secret)"]
+        BP["Agent Identity Blueprint<br/>(AWS federated credential)"]
         AID["Agent Identity<br/>(child of Blueprint)"]
     end
 
     subgraph AWS["AWS (eu-central-1)"]
         AUTHZ["AgentCore Runtime<br/>Custom JWT Authorizer<br/>iss + aud + scp"]
         AGENT["Agent container<br/>MSAL Python:<br/>Blueprint CCA -> FMI T1<br/>-> Agent CCA OBO TR"]
-        SM["Secrets Manager<br/>Blueprint secret"]
+        STS["AWS STS<br/>GetWebIdentityToken"]
         subgraph EchoStack["Echo API (downstream)"]
             EAUTHZ["API Gateway JWT Authorizer<br/>aud + iss(v2.0)"]
             ELAMBDA["Echo Lambda"]
@@ -45,10 +45,10 @@ flowchart TD
 
     GRAPH["Microsoft Graph MCP<br/>(external, Entra-protected)"]
 
-    SPA -->|"1. Bearer Entra user token<br/>(scope access_agent)"| AUTHZ
+    SPA -->|"1. Bearer Entra user token<br/>(scope agent.invoke)"| AUTHZ
     AUTHZ -->|"validated request +<br/>forwarded Authorization header"| AGENT
-    AGENT -->|"reads Blueprint secret"| SM
-    AGENT -->|"2. Exchange incoming authorization token for downstream<br/>(Entra Agent ID on-behalf-of the user)"| IDP
+    AGENT -->|"AWS IAM role assertion"| STS
+    AGENT -->|"2. AWS assertion + incoming authorization token<br/>(FMI/OBO on behalf of the user)"| IDP
     AGENT -->|"Bearer TR (Echo scope)"| EAUTHZ
     EAUTHZ --> ELAMBDA
     AGENT -->|"Bearer TR (MCP scope)"| GRAPH
@@ -68,12 +68,11 @@ hand to the model — see [Security notes](#security-notes).
 | **SPA** (`spa/`) | User sign-in + chat UI; acquires the Entra user token and invokes the AgentCore Runtime (header-only Bearer) | Browser (static files; nginx container for local serving) | MSAL.js 3.28.1, Bootstrap 5.3.3, `marked` + DOMPurify |
 | **AgentCore Runtime** (`AgentRuntime`) | Hosts the agent; its **built-in JWT authorizer** validates the inbound Entra token before the container runs | AWS Bedrock AgentCore (managed), eu-central-1 | `AWS::BedrockAgentCore::Runtime` |
 | **Agent code** (`agent/src/agent.py`) | Extracts the inbound token, runs the in-process FMI→OBO exchange, calls the Echo API tool and (optional) MCP tools | Inside the AgentCore Runtime container (Python 3.12) | MSAL Python, Strands Agents, `bedrock-agentcore` SDK, Bedrock (Nova Micro) |
-| **Agent Identity Blueprint** | Entra object holding the agent's credential; | Microsoft Entra ID | Agent Identity Blueprint (PoC: `client_secret`) |
+| **Agent Identity Blueprint** | Entra object holding the AWS execution role's federated identity credential | Microsoft Entra ID | Agent Identity Blueprint + FIC |
 | **Agent Identity** | The agent's *own* derived identity (child of the Blueprint) | Microsoft Entra ID | Entra Agent Identity object |
 | **Echo API** (`EchoHttpApi` + `EchoLambdaFunction`) | Downstream Entra-protected REST API the agent calls on the user's behalf | AWS API Gateway v2 HTTP API + Lambda | API Gateway native **JWT authorizer** + inline Python Lambda |
 | **Microsoft MCP Server for Enterprise** | Instance of [Microsoft MCP Server for Enterprise](https://learn.microsoft.com/en-us/graph/mcp-server/get-started) ; tools surfaced to the agent | External (Microsoft-hosted) | MCP over Streamable HTTP (SSE fallback) |
-| **Secrets Manager** (`BlueprintSecretArn`) | Stores the Blueprint `{clientId, clientSecret}`; read once per process | AWS Secrets Manager | `secretsmanager:GetSecretValue` (any region; derived from ARN) |
-| **IAM execution role** (`RuntimeExecutionRole`) | Runtime permissions: invoke Bedrock model, read Blueprint secret, write logs, get S3 artifact | AWS IAM | `AWS::IAM::Role` |
+| **IAM execution role** (`RuntimeExecutionRole`) | Runtime permissions: invoke Bedrock, mint a constrained AWS web identity token, write logs, and read the S3 artifact | AWS IAM | `AWS::IAM::Role` |
 | **Microosft Entra ID tenant** | Issues all tokens; Performs all authorizations | Microsoft Entra ID | — |
 
 ---
@@ -95,9 +94,11 @@ things about the inbound Entra **user** token:
 |---|---|---|
 | `DiscoveryUrl` | `iss` | Entra OIDC metadata for the tenant (`…/v2.0/.well-known/openid-configuration`) |
 | `AllowedAudience` | `aud` | `AgentCoreAppClientId` (the Blueprint Client ID) — both bare-GUID and `api://{guid}` forms accepted |
-| `AllowedScopes` | `scp` | `access_agent` |
+| `AllowedScopes` | `scp` | `AgentCoreAllowedScope` / `AGENTCORE_ALLOWED_SCOPE` |
 
 - A **rejection is an HTTP 403 with no container log** — the request never reaches the agent, so absence of a runtime log line is the signature of a front-door rejection (as opposed to an in-agent error, which *does* log).
+- `AllowedScopes` compares the scope **value** from `scp`, such as `agent.invoke`;
+  it is not the full `api://{client-id}/agent.invoke` scope URI.
 - The runtime also sets `RequestHeaderConfiguration.RequestHeaderAllowlist: [Authorization]` so the validated `Authorization` header is **forwarded** to the container. This is what makes the in-process OBO possible (see [Status](#status--known-issues) — "Path A").
 
 ### 2. Downstream — Echo API JWT authorizer
@@ -113,13 +114,13 @@ one. In the deployed stack this is an **API Gateway v2 native JWT authorizer**
 
 `GET /health` is unauthenticated. The token this authorizer validates is the **downstream TR** the agent minted via OBO (audience = Echo API), **not** the inbound user token (audience = Blueprint).
 
-**Two boundaries, two audiences:** the inbound user token is audienced to the **Blueprint** (`access_agent`); the downstream token is audienced to the **Echo API**. The agent's job is to convert the first into the second via MSAL Python.
+**Two boundaries, two audiences:** the inbound user token is audienced to the **Blueprint** (`agent.invoke`); the downstream token is audienced to the **Echo API**. The agent's job is to convert the first into the second via MSAL Python.
 
 ---
 
 ## Token flow (the three legs)
 
-1. **SPA acquires the user token.** MSAL.js signs the user in (auth code + PKCE) and calls `acquireTokenSilent`/`acquireTokenPopup` for scope `api://{AgentCoreAppClientId}/access_as_user` (`access_agent`). The resulting Entra user JWT (aud = Blueprint) is sent to the runtime **header-only**: `Authorization: Bearer …` plus a `{ "message": … }` body. The token is never placed in the body for real traffic.
+1. **SPA acquires the user token.** MSAL.js signs the user in (auth code + PKCE) and calls `acquireTokenSilent`/`acquireTokenPopup` for scope `api://{AgentCoreAppClientId}/agent.invoke` (`agent.invoke`). The resulting Entra user JWT (aud = Blueprint) is sent to the runtime **header-only**: `Authorization: Bearer …` plus a `{ "message": … }` body. The token is never placed in the body for real traffic.
 
 2. **AgentCore authorizer validates it.** The front-door JWT authorizer checks `iss` + `aud` + `scp` (see above). On success the validated `Authorization` header is forwarded to the container; `agent.py` `_extract_inbound_token()` reads the token from it.
 
@@ -140,8 +141,8 @@ The single CloudFormation template `infra/cloudformation/stack.yaml` (stack name
 
 | Logical ID | Type | Purpose |
 |---|---|---|
-| `RuntimeExecutionRole` | `AWS::IAM::Role` | AgentCore runtime perms: `bedrock:InvokeModel*`, `secretsmanager:GetSecretValue` (Blueprint), CloudWatch Logs, S3 get/list on the artifact bucket |
-| `AgentRuntime` | `AWS::BedrockAgentCore::Runtime` | The hosted agent. Code from S3 (`agent.zip`), Python 3.12, `app.py` entrypoint. **Custom JWT authorizer** (iss/aud/scp), `RequestHeaderAllowlist: [Authorization]`, env vars (tenant, agent identity, Blueprint secret ARN, Echo URL/scope, MCP URL/scope, model) |
+| `RuntimeExecutionRole` | `AWS::IAM::Role` | AgentCore runtime perms: `bedrock:InvokeModel*`, constrained `sts:GetWebIdentityToken`, CloudWatch Logs, and S3 get/list on the artifact bucket |
+| `AgentRuntime` | `AWS::BedrockAgentCore::Runtime` | The hosted agent. Code from S3 (`agent.zip`), Python 3.12, `app.py` entrypoint. **Custom JWT authorizer** (iss/aud/scp), `RequestHeaderAllowlist: [Authorization]`, env vars (tenant, Blueprint/agent IDs, Echo URL/scope, MCP URL/scope, model) |
 | `AgentRuntimeEndpoint` | `AWS::BedrockAgentCore::RuntimeEndpoint` | The invokable endpoint (qualifier `default`) |
 | `EchoLambdaRole` | `AWS::IAM::Role` | Echo Lambda basic execution role |
 | `EchoLambdaFunction` | `AWS::Lambda::Function` | Inline Python echo handler; echoes `message` and the caller from the JWT authorizer claims |
@@ -169,8 +170,8 @@ Per [`docs/entra-setup-guide.md`](docs/entra-setup-guide.md):
 
 | Object | Type | Role |
 |---|---|---|
-| **SPA app registration** (`agentid-poc-spa`) | App registration (public client) | The SPA's MSAL identity; requests the `access_agent` token audienced to the Blueprint |
-| **Agent Identity Blueprint** | Blueprint object | Holds the agent's credential. **PoC uses a `client_secret`**; production path is a **certificate** (SNI/x5c) — a client secret cannot satisfy FMI SNI requirements under hardened tenant policy. Created via **Entra admin center → Agents → Blueprints → New** |
+| **SPA app registration** (`agentid-poc-spa`) | App registration (public client) | The SPA's MSAL identity; requests the `agent.invoke` token audienced to the Blueprint |
+| **Agent Identity Blueprint** | Blueprint object | Holds a FIC that trusts the AWS account issuer and the exact AgentCore execution-role ARN. Created via **Entra admin center → Agents → Blueprints → New** |
 | **Agent Identity** | Entra Agent Identity object (child of the Blueprint) | The agent's *own* identity; its object ID is the `fmi_path` / `AGENT_IDENTITY_ID`. **Not** an app registration |
 | **Echo API app registration** (`agentid-poc-echo-api`) | App registration | Exposes the Echo scope and is the audience the downstream TR is validated against |
 
@@ -188,6 +189,58 @@ Per [`docs/entra-setup-guide.md`](docs/entra-setup-guide.md):
 
 ---
 
+## One-time AWS and Blueprint federation setup
+
+Outbound web identity federation is an AWS **account setting**, not a native
+CloudFormation resource. Enable it once outside the stack.
+The operator needs `iam:EnableOutboundWebIdentityFederation` and
+`iam:GetOutboundWebIdentityFederationInfo`.
+
+**CLI:**
+
+```powershell
+aws iam enable-outbound-web-identity-federation --profile agentid-poc
+
+$issuer = aws iam get-outbound-web-identity-federation-info `
+    --profile agentid-poc `
+    --query IssuerIdentifier `
+    --output text
+```
+
+If it is already enabled, the first command returns `FeatureEnabled`; use the second
+command to retrieve the existing issuer.
+
+**Console:** Open **IAM → Access management → Account settings → Outbound identity
+federation**, select **Enable**, and copy the token issuer URL.
+
+Deploy the stack, then obtain the exact FIC subject from its `ExecutionRoleArn` output:
+
+```powershell
+$subject = aws cloudformation describe-stacks `
+    --stack-name agentid-poc `
+    --profile agentid-poc `
+    --query "Stacks[0].Outputs[?OutputKey=='ExecutionRoleArn'].OutputValue | [0]" `
+    --output text
+```
+
+On the **Agent Identity Blueprint application object**, add a federated identity
+credential with these exact, case-sensitive values:
+
+| FIC field | Value |
+|---|---|
+| Name | `aws-agentcore-runtime` |
+| Issuer | `$issuer` (the account-specific `https://...tokens.sts.global.api.aws` URL) |
+| Subject | `$subject` (the stack's exact execution-role ARN) |
+| Audience | `api://AzureADTokenExchange` |
+
+In the Entra admin center, open the Blueprint's management page, select **Credentials**
+under **Developer settings**, open **Federated credentials**, and select **Add
+credential → Other issuer**. The subject is the IAM role ARN, not an STS `assumed-role`
+session ARN, AgentCore runtime ARN, or Agent Identity ID.
+
+Issuer and subject are account/stack-specific. Recreate or update the FIC if the stack
+name changes because the template derives the role name from the stack name.
+
 ## Build / deploy / invoke
 
 Full walkthrough: [`docs/deployment-guide.md`](docs/deployment-guide.md). The short path
@@ -195,19 +248,22 @@ Full walkthrough: [`docs/deployment-guide.md`](docs/deployment-guide.md). The sh
 
 1. **Authenticate.** `aws sso login --profile agentid-poc` (see
    [`scripts/aws-auth.ps1`](scripts/aws-auth.ps1)).
-2. **Store the Blueprint secret** once in Secrets Manager (deployment guide Step 1).
+2. **Enable AWS outbound identity federation** once and record its issuer as described
+   above.
 3. **Deploy.** [`scripts/aws-deploy.ps1`](scripts/aws-deploy.ps1) builds the agent ZIP
    ([`scripts/build-zip.ps1`](scripts/build-zip.ps1)), uploads it to S3, and runs
    `aws cloudformation deploy`. Required params come from `.env` or the command line
-   (tenant, agent identity, Blueprint secret ARN, Echo API client ID, MCP URL/scope,
+   (tenant, agent identity, Blueprint client ID, Echo API client ID, MCP URL/scope,
    AgentCore app client ID).
-4. **⚠️ Repoint the SPA after every deploy.** `aws-deploy.ps1` mints a **new
+4. **Add the Blueprint FIC** using the account issuer and the stack's
+   `ExecutionRoleArn` output as described above.
+5. **⚠️ Repoint the SPA after every deploy.** `aws-deploy.ps1` mints a **new
    timestamped runtime name** (`agentid_core_<timestamp>`) on each deploy and CFN
    *replaces* the runtime, so the old runtime ARN is deleted. **You must paste the printed
    `agentCoreEndpoint` URL into [`spa/msal-config.js`](spa/msal-config.js.sample) after
    every deploy** — otherwise the SPA invokes a deleted runtime and fails with
    `No endpoint or agent found with qualifier 'default'`.
-5. **Invoke.** Sign in to the SPA and chat — all testing happens over REST via
+6. **Invoke.** Sign in to the SPA and chat — all testing happens over REST via
    the SPA. Teardown: [`scripts/aws-destroy.ps1`](scripts/aws-destroy.ps1).
 
 ---
@@ -232,19 +288,13 @@ Full walkthrough: [`docs/deployment-guide.md`](docs/deployment-guide.md). The sh
 - **Tokens are never passed to the LLM.** Tools return only the API response payload; the
   inbound token lives in a module-level `_current_token` that is **cleared in a `finally`
   block after every invoke** and never persists between calls.
-- **Blueprint credential** lives in **Secrets Manager** and is read once per process; the
-  in-memory secret is deleted immediately after the MSAL app is constructed.
-- **Production migration:** move the Blueprint from `client_secret` to a **certificate**
-  (SNI/x5c) — a client secret cannot satisfy FMI SNI requirements in a hardened tenant. A
-  fully production-aligned alternative (deferred) is **AgentCore Identity native OBO**
-  (`ON_BEHALF_OF_TOKEN_EXCHANGE`), which would drop the in-process MSAL exchange and the
-  Blueprint secret entirely.
-
----
-
-## Next steps
-
-As next step evaluation to register AWS IAM STS token issuer as federated identity credential for the Agent Blueprint and inject AWS token into the Agent Core runtime.
+- **No long-lived Blueprint secret exists in AWS.** The runtime uses its temporary role
+  credentials to request a five-minute, RS256 AWS assertion from regional STS. IAM limits
+  the assertion audience to `api://AzureADTokenExchange` and its lifetime to 300 seconds.
+- For FIC troubleshooting, deploy with `-EnableAuthDiagnostics`. CloudWatch then records
+  only `alg`, `kid`, `typ`, `iss`, `sub`, `aud`, `iat`, `exp`, lifetime, and `jti` under
+  `AWS assertion metadata`. The raw assertion and signature are never logged. Redeploy
+  without the switch after troubleshooting.
 
 ---
 

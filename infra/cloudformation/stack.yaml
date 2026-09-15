@@ -33,9 +33,6 @@ Parameters:
   AgentIdentityId:
     Type: String
 
-  BlueprintSecretArn:
-    Type: String
-
   EchoApiClientId:
     Type: String
     Description: >
@@ -55,7 +52,7 @@ Parameters:
   # Inbound Identity — Entra JWT authorizer validates exactly three things:
   #   iss — the issuer (Entra tenant), validated automatically via DiscoveryUrl
   #   aud — must equal the Blueprint client ID (AgentCoreAppClientId)
-  #   scp — must contain the delegated scope 'access_agent' (AllowedScopes)
+  #   scp — must contain AgentCoreAllowedScope
   # DiscoveryUrl: Entra OIDC metadata endpoint for the tenant
   # AllowedAudience: the Blueprint app reg client ID that is the token audience
   EntraDiscoveryUrl:
@@ -70,10 +67,24 @@ Parameters:
       The Entra app registration client ID that is the audience (aud) of the
       access token the SPA requests. Typically the Blueprint app reg client ID.
 
+  AgentCoreAllowedScope:
+    Type: String
+    Default: agent.invoke
+    Description: >
+      Delegated scope value required in the inbound Entra token's scp claim.
+
   DeployId:
     Type: String
     Default: initial
     Description: Timestamp-based value changed on each deploy to force runtime reload.
+
+  AuthDiagnosticsEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Log non-secret AWS assertion metadata. Never logs the assertion itself.
 
 Resources:
 
@@ -99,12 +110,16 @@ Resources:
                   - bedrock:InvokeModel
                   - bedrock:InvokeModelWithResponseStream
                 Resource: '*'
-              - Sid: SecretsAccess
+              - Sid: MintEntraFederationAssertion
                 Effect: Allow
-                Action: secretsmanager:GetSecretValue
-                Resource:
-                  - !Ref BlueprintSecretArn
-                  - !Sub '${BlueprintSecretArn}-*'
+                Action: sts:GetWebIdentityToken
+                Resource: '*'
+                Condition:
+                  ForAllValues:StringEquals:
+                    sts:IdentityTokenAudience:
+                      - api://AzureADTokenExchange
+                  NumericLessThanEquals:
+                    sts:DurationSeconds: 300
               - Sid: Logs
                 Effect: Allow
                 Action:
@@ -262,13 +277,15 @@ Resources:
       EnvironmentVariables:
         BEDROCK_MODEL_ID: !Ref BedrockModelId
         AWS_DEFAULT_REGION: !Ref AWS::Region
+        AWS_STS_REGIONAL_ENDPOINTS: regional
         ENTRA_TENANT_ID: !Ref EntraTenantId
+        BLUEPRINT_CLIENT_ID: !Ref AgentCoreAppClientId
         AGENT_IDENTITY_ID: !Ref AgentIdentityId
-        BLUEPRINT_SECRET_ARN: !Ref BlueprintSecretArn
         ECHO_API_URL: !Sub 'https://${EchoHttpApi}.execute-api.${AWS::Region}.amazonaws.com'
         ECHO_API_SCOPE: !Ref EchoApiScope
         MCP_SERVER_URL: !Ref McpServerUrl
         MCP_SERVER_SCOPE: !Ref McpServerScope
+        AUTH_DIAGNOSTICS_ENABLED: !Ref AuthDiagnosticsEnabled
         DEPLOY_ID: !Ref DeployId
       NetworkConfiguration:
         NetworkMode: PUBLIC
@@ -283,7 +300,7 @@ Resources:
             - !Ref AgentCoreAppClientId
             - !Sub 'api://${AgentCoreAppClientId}'
           AllowedScopes:
-            - access_agent
+            - !Ref AgentCoreAllowedScope
 
   AgentRuntimeEndpoint:
     Type: AWS::BedrockAgentCore::RuntimeEndpoint
@@ -315,6 +332,7 @@ Outputs:
     Value: !GetAtt AgentRuntimeEndpoint.Status
 
   ExecutionRoleArn:
+    Description: Use this exact role ARN as the subject of the Blueprint federated identity credential.
     Value: !GetAtt RuntimeExecutionRole.Arn
 
   ArtifactBucket:

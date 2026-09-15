@@ -9,14 +9,14 @@ The Agent ID OBO flow is a **two-stage token exchange** that differs from standa
 | Input | Description |
 |---|---|
 | `Tc` | The user's access token issued to the **SPA** by Entra. Audience = Blueprint client_id. The SPA sends this to AgentCore; AgentCore passes it through to the Python agent. |
-| Blueprint `client_credential` | For PoC: a client secret stored in AWS Secrets Manager. Production: Federated Identity Credential (UAMI or AWS OIDC). |
+| Blueprint `client_credential` | A short-lived AWS IAM JWT issued for the AgentCore execution role and trusted through a Blueprint federated identity credential. |
 
 ### Step-by-step
 
 ```
 Step 1 — SPA authenticates user
   MSAL.js → Entra /authorize (auth code + PKCE)
-  Scope requested: api://{blueprint-client-id}/access_as_user
+  Scope requested: api://{blueprint-client-id}/agent.invoke
   → Entra issues Tc (user JWT, aud = {blueprint-client-id})
 
 Step 2 — SPA calls AgentCore
@@ -35,7 +35,7 @@ Step 4 — MSAL Python: Stage 1 (FMI / T1)
   client_id={blueprint-client-id}
   &scope=api://AzureADTokenExchange/.default
   &fmi_path={agent-identity-object-id}          <- Agent Identity Object ID
-  &client_assertion={blueprint-client-secret}    <- PoC: secret; Prod: cert
+  &client_assertion={AWS-IAM-JWT}                <- five-minute STS token
   &grant_type=client_credentials
   → Entra issues T1 (aud = Entra ID Token Exchange, sub = agent-identity)
   T1 is cached by the long-lived Blueprint CCA instance.
@@ -78,7 +78,7 @@ There are **four Entra objects** in this PoC. They are **not all app registratio
 | # | Name | Type | Has client_id? | Has client_secret? |
 |---|---|---|---|---|
 | 2a | `agentid-poc-spa` | App Registration (SPA, public client) | ✅ Yes | ❌ No |
-| 2b | `agentid-poc-blueprint` | Agent Identity Blueprint (created under Agents, not App registrations) | ✅ Yes | ✅ Yes (PoC) |
+| 2b | `agentid-poc-blueprint` | Agent Identity Blueprint (created under Agents, not App registrations) | ✅ Yes | ❌ No; trusts the AWS role through a FIC |
 | 2c | `agentid-poc-identity` | Agent Identity Object (new Entra object type, child of Blueprint) | ✅ Yes (same as object id) | ❌ No |
 | 2d | `agentid-poc-echo-api` | App Registration (Web API) | ✅ Yes | Optional |
 
@@ -92,12 +92,14 @@ This is a standard public client SPA app registration. MSAL.js signs in users ag
 | Type | **App Registration** — Single-page application (public client) |
 | Platform | SPA — no client secret |
 | Redirect URI | `http://localhost:3000` (dev) / `https://{spa-host}` (prod) |
-| API permissions | `api://{blueprint-client-id}/access_as_user` (delegated) |
+| API permissions | `api://{blueprint-client-id}/agent.invoke` (delegated) |
 | Admin consent required | No (user consent sufficient if tenant allows it) |
 
 ### 2b. Agent Identity Blueprint (`agentid-poc-blueprint`)
 
-This is the **parent credential holder** — MSAL Python authenticates AS this Blueprint using its `client_id` and `client_secret` (PoC) or certificate (production). It is a **Blueprint object**, not a standard app registration. It is created under the **Agents** blade in Entra admin center (not under App registrations).
+This is the **parent credential holder**. MSAL Python authenticates as the Blueprint
+with an AWS IAM JWT whose issuer and execution-role subject are trusted by a federated
+identity credential. It is a **Blueprint object**, not a standard app registration.
 
 Created in: **Entra admin center → Identity  → Agents → Agent Blueprints → New** (the exact label may be "Agent Blueprints" or similar under the Agents blade)
 
@@ -105,8 +107,38 @@ Created in: **Entra admin center → Identity  → Agents → Agent Blueprints �
 |---|---|
 | Display name | `agentid-poc-blueprint` |
 | Type | **Agent Identity Blueprint (Agents blade — not App registrations)** |
-| Client secret | PoC: store in AWS Secrets Manager (JSON key `clientSecret`). **Production: migrate to certificate — client_secret cannot satisfy SNI/x5c requirements for FMI in hardened tenants.** |
+| Federated credential | Issuer = AWS account token issuer; subject = exact AgentCore `ExecutionRoleArn`; audience = `api://AzureADTokenExchange` |
 | Expose an API & Scope via Manifest | Highly redacted part - important is the `identifierUris` and `api:oauth2PermissionScopes` (ref Blueprint manifest bellow) |
+
+After enabling AWS outbound identity federation and deploying the stack, collect the
+two account/stack-specific values:
+
+```powershell
+$issuer = aws iam get-outbound-web-identity-federation-info `
+    --profile agentid-poc `
+    --query IssuerIdentifier `
+    --output text
+
+$subject = aws cloudformation describe-stacks `
+    --stack-name agentid-poc `
+    --profile agentid-poc `
+    --query "Stacks[0].Outputs[?OutputKey=='ExecutionRoleArn'].OutputValue | [0]" `
+    --output text
+```
+
+From the Blueprint's management page, select **Credentials** under **Developer
+settings**, open **Federated credentials**, and select **Add credential → Other
+issuer**, then set:
+
+```text
+Name:     aws-agentcore-runtime
+Issuer:   <the value of $issuer>
+Subject:  <the value of $subject>
+Audience: api://AzureADTokenExchange
+```
+
+Use the values exactly; matching is case-sensitive. The subject is the IAM role ARN
+from CloudFormation, not an STS assumed-role ARN, runtime ARN, or Agent Identity ID.
 
 Excerpt from the Agent Blueprint manifest
 
@@ -181,7 +213,7 @@ Response includes the `id` field — this is the `{agent-identity-object-id}` us
 |---|---|
 | Display name | `agentid-poc-identity` |
 | Parent Blueprint | `{blueprint-client-id}` (the Blueprint app registration above) |
-| **Object ID** | `{agent-identity-object-id}` — the ONLY identifier; used as `fmi_path` in token requests and `AgentIdentity` in sidecar calls |
+| **Object ID** | `{agent-identity-object-id}` — the ONLY identifier; used as `fmi_path` in token requests |
 | client_id | ✅ **None** — client_id is same as the object id |
 | client_secret | ❌ **None** — credentials are managed in the Blueprint |
 
@@ -206,7 +238,7 @@ Created in: **Entra admin center → Identity → App registrations → New regi
 ### 2e. Permission Grant Summary
 
 ```
-SPA  ──requests──►  api://{blueprint-client-id}/access_as_user   (user delegates to SPA)
+SPA  ──requests──►  api://{blueprint-client-id}/agent.invoke   (user delegates to SPA)
 Agent Identity  ──requests──►  api://{echo-api-client-id}/access_as_user  (admin consent required)
 ```
 
@@ -227,27 +259,37 @@ inside the agent container. There is no sidecar process or localhost HTTP call.
 ### 3a. Module-level setup
 
 ```python
-import msal, boto3, json, os
+import msal, boto3, os
 
 ENTRA_TENANT_ID    = os.environ["ENTRA_TENANT_ID"]
 BLUEPRINT_CLIENT_ID = os.environ["BLUEPRINT_CLIENT_ID"]
-BLUEPRINT_SECRET_ARN = os.environ["BLUEPRINT_SECRET_ARN"]
 AGENT_IDENTITY_ID  = os.environ["AGENT_IDENTITY_ID"]   # Agent Identity Object ID
 AUTHORITY = "https://login.microsoftonline.com/{}".format(ENTRA_TENANT_ID)
 FMI_SCOPE = ["api://AzureADTokenExchange/.default"]
 
-def _load_blueprint_secret() -> str:
-    sm = boto3.client("secretsmanager")
-    raw = sm.get_secret_value(SecretId=BLUEPRINT_SECRET_ARN)
-    return json.loads(raw["SecretString"])["clientSecret"]
+_sts = None
+
+def _get_aws_assertion(*args, **kwargs) -> str:
+    global _sts
+    if _sts is None:
+        _sts = boto3.client("sts", region_name=os.environ["AWS_DEFAULT_REGION"])
+    return _sts.get_web_identity_token(
+        Audience=["api://AzureADTokenExchange"],
+        SigningAlgorithm="RS256",
+        DurationSeconds=300,
+    )["WebIdentityToken"]
 
 # Long-lived Blueprint CCA — in-memory token cache persists across invocations
 _blueprint_app = msal.ConfidentialClientApplication(
     BLUEPRINT_CLIENT_ID,
-    client_credential=_load_blueprint_secret(),
+    client_credential={"client_assertion": _get_aws_assertion},
     authority=AUTHORITY,
 )
 ```
+
+`_get_aws_assertion` is a delegate, not an eagerly evaluated function call. Creating
+the CCA does not mint a JWT. MSAL invokes the delegate only when it must send a token
+request, and the delegate returns a newly minted assertion each time.
 
 ### 3b. Two-stage token exchange (_get_downstream_token)
 
@@ -331,10 +373,6 @@ ENTRA_TENANT_ID={tenant-id}
 # Blueprint app registration client ID
 BLUEPRINT_CLIENT_ID={blueprint-client-id}
 
-# AWS Secrets Manager ARN — secret JSON: {"clientId": "...", "clientSecret": "..."}
-# PoC: client_secret. Production: migrate to certificate credential.
-BLUEPRINT_SECRET_ARN=arn:aws:secretsmanager:{region}:{account}:secret:agentid-poc/blueprint
-
 # Agent Identity Object ID (NOT a client_id — see section 2c)
 AGENT_IDENTITY_ID={agent-identity-object-id}
 
@@ -344,33 +382,15 @@ ECHO_API_SCOPE=api://{echo-api-client-id}/access_as_user
 
 # MCP Server (optional)
 MCP_SERVER_URL=https://{mcp-server-host}
-MCP_SERVER_SCOPE=api://{mcp-server-client-id}/access_as_user
+MCP_SERVER_SCOPE=api://{mcp-server-client-id}/MCP.User.Read.All
 ```
 
-### 4b. AWS Secrets Manager secret format
+### 4b. AWS execution-role assertion
 
-The secret at `BLUEPRINT_SECRET_ARN` must contain a JSON object:
-
-```json
-{
-  "clientId": "{blueprint-client-id}",
-  "clientSecret": "{blueprint-client-secret}"
-}
-```
-
-> PoC only. For production, replace with a certificate credential:
-> ```json
-> {
->   "clientId": "{blueprint-client-id}",
->   "private_key_pem": "-----BEGIN RSA PRIVATE KEY-----\n...",
->   "public_certificate": "-----BEGIN CERTIFICATE-----\n...",
->   "thumbprint": "{hex-sha1-thumbprint}"
-> }
-> ```
-> Register the certificate under the Blueprint object in Entra admin center
-> (Agents section → Blueprint → Certificates & secrets → Certificates).
-> Update the `ConfidentialClientApplication` constructor to pass the certificate
-> dict instead of the plain string secret.
+The runtime calls the regional STS `GetWebIdentityToken` API with its temporary
+execution-role credentials. The CloudFormation role policy restricts the audience to
+`api://AzureADTokenExchange` and the duration to at most 300 seconds. No long-lived
+Blueprint credential is stored in AWS.
 
 ### 4c. AgentCore container — no sidecar container
 
@@ -391,12 +411,7 @@ Echo API directly over the public internet via AgentCore's built-in egress.
         {"name": "ECHO_API_URL",        "value": "https://{echo-api-host}"},
         {"name": "ECHO_API_SCOPE",      "value": "api://{echo-api-client-id}/access_as_user"}
       ],
-      "secrets": [
-        {
-          "name": "BLUEPRINT_SECRET_ARN",
-          "valueFrom": "arn:aws:secretsmanager:{region}:{account}:secret:agentid-poc/blueprint"
-        }
-      ]
+      "secrets": []
     }
   ]
 }
@@ -408,14 +423,14 @@ Echo API directly over the public internet via AgentCore's built-in egress.
 
 ```
 ┌─────────┐  MSAL.js   ┌───────────────────────────────────────────────────┐
-│   SPA   │──────────►│                   Microsoft Entra ID                │
-│(browser)│ auth code  │  tenant: {tenant-id}                               │
+│   SPA   │───────────►│                   Microsoft Entra ID              │
+│(browser)│ auth code  │  tenant: {tenant-id}                              │
 └────┬────┘ + PKCE     └───────────────────────────────────────────────────┘
      │                        │
-     │  (1) GET Tc              │ issues Tc
+     │  (1) GET Tc            │ issues Tc
      │  scope:                │ (JWT, aud={blueprint-client-id},
-     │  api://{blueprint}/    │  sub=user, scope=access_as_user)
-     │  access_as_user        │
+     │  api://{blueprint}/    │  sub=user, scope=agent.invoke)
+     │  agent.invoke          │
      │◄───────────────────────┘
      │
      │  (2) POST {agentcore-endpoint}
@@ -494,15 +509,15 @@ const msalConfig = {
 
 // Token acquisition
 const tokenRequest = {
-  scopes: ['api://{blueprint-client-id}/access_as_user'],
+  scopes: ['api://{blueprint-client-id}/agent.invoke'],
 };
 const tokenResponse = await msalInstance.acquireTokenSilent(tokenRequest);
 const userToken = tokenResponse.accessToken;  // This is Tc
 ```
 
-The SPA must request **exactly** the delegated scope `api://{blueprint-client-id}/access_as_user`. This causes Entra to issue `Tc` with:
+The SPA must request **exactly** the delegated scope `api://{blueprint-client-id}/agent.invoke`. This causes Entra to issue `Tc` with:
 - `aud = {blueprint-client-id}`  — validated by MSAL OBO in Stage 2
-- `scp = access_as_user`
+- `scp = agent.invoke`
 - `sub = {user-object-id}`
 
 ### 6b. How AgentCore's JWT authorizer validates Tc
@@ -557,7 +572,8 @@ the `user_assertion` parameter.
 |---|---|---|
 | `{tenant-id}` | Entra tenant GUID | `ENTRA_TENANT_ID` env var, AgentCore discoveryUrl, MSAL authority |
 | `{blueprint-client-id}` | Client ID of the Blueprint (Agents section) | `BLUEPRINT_CLIENT_ID` env var, OBO `client_id`, audience of Tc and T1 |
-| `{blueprint-client-secret}` | PoC credential for the Blueprint | AWS Secrets Manager secret (`clientSecret` key) |
+| `{aws-token-issuer}` | Account-specific issuer returned by IAM | Blueprint FIC issuer |
+| `{runtime-execution-role-arn}` | CloudFormation `ExecutionRoleArn` output | Blueprint FIC subject |
 | `{agent-identity-object-id}` | Object ID of the Agent Identity Object (NOT a client_id) | `AGENT_IDENTITY_ID` env var, `fmi_path` in Stage 1 token request |
 | `{echo-api-client-id}` | Client ID of the Echo REST API app registration | `ECHO_API_SCOPE` env var, agent identity permission |
 | `{echo-api-host}` | Hostname of the Echo REST API | `ECHO_API_URL` env var |
@@ -567,4 +583,5 @@ the `user_assertion` parameter.
 
 > ⚠️ **Important:** The Agent Identity Object (`agentid-poc-identity`) does **NOT** have a `client_id`. It only has an `{agent-identity-object-id}` (Object ID). Any reference to `{agent-identity-client-id}` in older drafts of this spec was incorrect and has been removed.
 
-> ⚠️ **PoC vs Production credential:** The Blueprint currently uses a `clientSecret` stored in AWS Secrets Manager. For production, migrate to a certificate credential (PEM private key + certificate chain + thumbprint) and register the certificate under the Blueprint object in Entra admin center (Agents section). Update the `ConfidentialClientApplication` constructor to pass the certificate dict instead of the plain string secret. A client_secret cannot satisfy SNI/x5c requirements in hardened Entra tenants.
+> The Blueprint has no long-lived client secret. Its FIC trusts only the AWS account
+> issuer and the exact AgentCore runtime execution-role ARN.
