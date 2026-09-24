@@ -79,6 +79,13 @@
 .PARAMETER EnableAuthDiagnostics
     Log only non-secret AWS assertion metadata for troubleshooting. The raw JWT is never logged.
 
+.PARAMETER EnableA2A
+    Add the A2A specialist and autonomous agent. Fill all four new Entra IDs first.
+    When omitted, an existing stack retains its A2A setting.
+
+.PARAMETER AutonomousScheduleState
+    ENABLED or DISABLED. Omission preserves the existing setting; new stacks default to DISABLED.
+
 .EXAMPLE
     .\aws-deploy.ps1 `
         -ArtifactBucket agentid-poc-artifacts `
@@ -113,7 +120,14 @@ param(
     [string]$EchoApiScope,
     [string]$AgentCoreAppClientId,
     [string]$AgentCoreAllowedScope,
-    [switch]$EnableAuthDiagnostics
+    [switch]$EnableAuthDiagnostics,
+    [switch]$EnableA2A,
+    [string]$Blueprint2ClientId,
+    [string]$Agent2IdentityId,
+    [string]$Blueprint3ClientId,
+    [string]$Agent3IdentityId,
+    [ValidateSet('ENABLED', 'DISABLED')]
+    [string]$AutonomousScheduleState
 )
 
 $ErrorActionPreference = 'Stop'
@@ -151,6 +165,10 @@ if (-not $McpServerUrl)       { $McpServerUrl       = $Script:_env_MCP_SERVER_UR
 if (-not $McpServerScope)     { $McpServerScope     = $Script:_env_MCP_SERVER_SCOPE }
 if (-not $AgentCoreAppClientId){ $AgentCoreAppClientId = $Script:_env_AGENTCORE_APP_CLIENT_ID }
 if (-not $AgentCoreAllowedScope){ $AgentCoreAllowedScope = $Script:_env_AGENTCORE_ALLOWED_SCOPE }
+if (-not $Blueprint2ClientId)  { $Blueprint2ClientId = $Script:_env_BLUEPRINT2_CLIENT_ID }
+if (-not $Agent2IdentityId)    { $Agent2IdentityId = $Script:_env_AGENT2_IDENTITY_ID }
+if (-not $Blueprint3ClientId)  { $Blueprint3ClientId = $Script:_env_BLUEPRINT3_CLIENT_ID }
+if (-not $Agent3IdentityId)    { $Agent3IdentityId = $Script:_env_AGENT3_IDENTITY_ID }
 
 # Hardcoded defaults for anything still missing
 if (-not $AwsConfig)          { $AwsConfig          = 'agentid-poc' }
@@ -178,9 +196,32 @@ if (-not $EchoApiClientId)    { $missing += 'EchoApiClientId    (ECHO_API_CLIENT
 if (-not $McpServerUrl)       { $missing += 'McpServerUrl       (MCP_SERVER_URL in .env)' }
 if (-not $McpServerScope)     { $missing += 'McpServerScope     (MCP_SERVER_SCOPE in .env)' }
 if (-not $AgentCoreAppClientId){ $missing += 'AgentCoreAppClientId (AGENTCORE_APP_CLIENT_ID in .env)' }
+if ($EnableA2A) {
+    if (-not $Blueprint2ClientId) { $missing += 'Blueprint2ClientId (BLUEPRINT2_CLIENT_ID in .env)' }
+    if (-not $Agent2IdentityId)   { $missing += 'Agent2IdentityId (AGENT2_IDENTITY_ID in .env)' }
+    if (-not $Blueprint3ClientId) { $missing += 'Blueprint3ClientId (BLUEPRINT3_CLIENT_ID in .env)' }
+    if (-not $Agent3IdentityId)   { $missing += 'Agent3IdentityId (AGENT3_IDENTITY_ID in .env)' }
+}
 if ($missing.Count -gt 0) {
     throw "Missing required parameters:`n  $($missing -join "`n  ")`nSet them in .env (copy .env.example) or pass as arguments."
 }
+
+# Omitted parameters retain their existing CloudFormation values. In particular,
+# an ordinary redeploy must not delete A2A resources or enable/disable the schedule.
+$a2aParameters = @()
+if ($PSBoundParameters.ContainsKey('EnableA2A')) {
+    if (-not $EnableA2A) { throw "Disable A2A explicitly through CloudFormation after reviewing resource deletion." }
+    $a2aParameters += 'EnableA2A=true'
+}
+foreach ($name in @('Blueprint2ClientId', 'Agent2IdentityId', 'Blueprint3ClientId', 'Agent3IdentityId')) {
+    $value = Get-Variable -Name $name -ValueOnly
+    if ($value) {
+        $guid = [guid]::Empty
+        if (-not [guid]::TryParse($value, [ref]$guid)) { throw "$name must be a GUID." }
+        $a2aParameters += "$name=$value"
+    }
+}
+if ($AutonomousScheduleState) { $a2aParameters += "AutonomousScheduleState=$AutonomousScheduleState" }
 
 $env:AWS_PROFILE        = $AwsConfig
 $env:AWS_REGION         = $Region
@@ -272,6 +313,15 @@ if (-not (Test-Path $ZipPathFull)) {
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPathFull)
 try {
+    $requiredEntries = @('app.py', 'identity.py', 'a2a_client.py', 'specialist.py', 'authorization.py', 'autonomous.py')
+    $absentEntries = @($requiredEntries | Where-Object { $_ -notin $zip.Entries.FullName })
+    if ($absentEntries.Count -gt 0) {
+        throw "ZIP is missing agent modules: $($absentEntries -join ', '). Rebuild the artifact."
+    }
+    $uncompressedSize = ($zip.Entries | Measure-Object -Property Length -Sum).Sum
+    if ($uncompressedSize -gt 250MB) {
+        throw "Uncompressed ZIP exceeds the 250 MB direct-deployment/Lambda limit."
+    }
     $bytecodeEntries = @(
         $zip.Entries | Where-Object {
             $_.FullName -match '(^|/)__pycache__(/|$)' -or
@@ -331,10 +381,27 @@ aws cloudformation deploy `
         "AgentCoreAllowedScope=$AgentCoreAllowedScope" `
         "AuthDiagnosticsEnabled=$($EnableAuthDiagnostics.IsPresent.ToString().ToLowerInvariant())" `
         "EntraDiscoveryUrl=https://login.microsoftonline.com/$EntraTenantId/v2.0/.well-known/openid-configuration" `
-        "DeployId=$deployId"
+        "DeployId=$deployId" `
+        @a2aParameters
 
 if ($LASTEXITCODE -ne 0) { throw "CloudFormation deploy failed." }
 Write-Host ""
+
+# A runtime ARN is allocated at creation, so its own Agent Card URL cannot be a
+# self-reference in CloudFormation. Publish it in a second, in-place stack update.
+$createdOutputs = Invoke-AwsJson @(
+    'cloudformation', 'describe-stacks', '--stack-name', $StackName,
+    '--query', 'Stacks[0].Outputs'
+)
+$specialistArn = ($createdOutputs | Where-Object { $_.OutputKey -eq 'SpecialistRuntimeArn' }).OutputValue
+if ($specialistArn) {
+    $publicUrl = "https://bedrock-agentcore.$Region.amazonaws.com/runtimes/$([Uri]::EscapeDataString($specialistArn))/invocations"
+    Invoke-Aws @(
+        'cloudformation', 'deploy', '--template-file', $TemplateFile,
+        '--stack-name', $StackName, '--capabilities', 'CAPABILITY_NAMED_IAM',
+        '--no-fail-on-empty-changes', '--parameter-overrides', "A2APublicUrl=$publicUrl"
+    )
+}
 
 # --- 5. Save state for teardown -----------------------------------------------
 $stateDir  = Join-Path $RepoRoot '.aws-state'

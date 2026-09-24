@@ -86,6 +86,47 @@ Parameters:
       - 'false'
     Description: Log non-secret AWS assertion metadata. Never logs the assertion itself.
 
+  EnableA2A:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  Blueprint2ClientId:
+    Type: String
+    Default: ''
+  Agent2IdentityId:
+    Type: String
+    Default: ''
+  Blueprint3ClientId:
+    Type: String
+    Default: ''
+  Agent3IdentityId:
+    Type: String
+    Default: ''
+  A2APublicUrl:
+    Type: String
+    Default: ''
+    Description: Populated by aws-deploy.ps1 after runtime creation for Agent Card discovery.
+  AutonomousScheduleState:
+    Type: String
+    Default: DISABLED
+    AllowedValues: [ENABLED, DISABLED]
+
+Rules:
+  A2AIdentitiesRequired:
+    RuleCondition: !Equals [!Ref EnableA2A, 'true']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref Blueprint2ClientId, '']]
+        AssertDescription: Blueprint 2 is required for A2A.
+      - Assert: !Not [!Equals [!Ref Agent2IdentityId, '']]
+        AssertDescription: Agent Identity 2 is required for A2A.
+      - Assert: !Not [!Equals [!Ref Blueprint3ClientId, '']]
+        AssertDescription: Blueprint 3 is required for A2A.
+      - Assert: !Not [!Equals [!Ref Agent3IdentityId, '']]
+        AssertDescription: Agent Identity 3 is required for A2A.
+
+Conditions:
+  A2AEnabled: !Equals [!Ref EnableA2A, 'true']
+
 Resources:
 
   RuntimeExecutionRole:
@@ -283,8 +324,8 @@ Resources:
         AGENT_IDENTITY_ID: !Ref AgentIdentityId
         ECHO_API_URL: !Sub 'https://${EchoHttpApi}.execute-api.${AWS::Region}.amazonaws.com'
         ECHO_API_SCOPE: !Ref EchoApiScope
-        MCP_SERVER_URL: !Ref McpServerUrl
-        MCP_SERVER_SCOPE: !Ref McpServerScope
+        A2A_RUNTIME_ARN: !If [A2AEnabled, !GetAtt SpecialistRuntime.AgentRuntimeArn, '']
+        A2A_SCOPE: !If [A2AEnabled, !Sub 'api://${Blueprint2ClientId}/user_impersonation', '']
         AUTH_DIAGNOSTICS_ENABLED: !Ref AuthDiagnosticsEnabled
         DEPLOY_ID: !Ref DeployId
       NetworkConfiguration:
@@ -307,6 +348,207 @@ Resources:
     Properties:
       AgentRuntimeId: !GetAtt AgentRuntime.AgentRuntimeId
       Name: !Ref EndpointName
+
+  SpecialistRole:
+    Type: AWS::IAM::Role
+    Condition: A2AEnabled
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-specialist-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SpecialistRuntime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']
+                Resource: '*'
+              - Effect: Allow
+                Action: sts:GetWebIdentityToken
+                Resource: '*'
+                Condition:
+                  ForAllValues:StringEquals:
+                    sts:IdentityTokenAudience: [api://AzureADTokenExchange]
+                  NumericLessThanEquals:
+                    sts:DurationSeconds: 300
+              - Effect: Allow
+                Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents']
+                Resource: '*'
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucket}/*'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucket}'
+
+  SpecialistRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Condition: A2AEnabled
+    Properties:
+      AgentRuntimeName: !Sub '${RuntimeName}_specialist'
+      AgentRuntimeArtifact:
+        CodeConfiguration:
+          Code:
+            S3:
+              Bucket: !Ref ArtifactBucket
+              Prefix: !Ref ArtifactKey
+          Runtime: !Ref PythonRuntime
+          EntryPoint: [specialist.py]
+      RoleArn: !GetAtt SpecialistRole.Arn
+      ProtocolConfiguration: A2A
+      NetworkConfiguration:
+        NetworkMode: PUBLIC
+      RequestHeaderConfiguration:
+        RequestHeaderAllowlist:
+          - Authorization
+          - X-Amzn-Bedrock-AgentCore-Runtime-Custom-Authorization
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref EntraDiscoveryUrl
+          AllowedAudience:
+            - !Ref Blueprint2ClientId
+            - !Sub 'api://${Blueprint2ClientId}'
+      EnvironmentVariables:
+        ENTRA_TENANT_ID: !Ref EntraTenantId
+        BLUEPRINT_CLIENT_ID: !Ref Blueprint2ClientId
+        AGENT_IDENTITY_ID: !Ref Agent2IdentityId
+        AGENT1_IDENTITY_ID: !Ref AgentIdentityId
+        AGENT3_IDENTITY_ID: !Ref Agent3IdentityId
+        AGENTCORE_RUNTIME_URL: !Ref A2APublicUrl
+        MCP_SERVER_URL: !Ref McpServerUrl
+        MCP_SERVER_SCOPE: !Ref McpServerScope
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        AWS_DEFAULT_REGION: !Ref AWS::Region
+        DEPLOY_ID: !Ref DeployId
+
+  AutonomousFailureQueue:
+    Type: AWS::SQS::Queue
+    Condition: A2AEnabled
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  AutonomousRole:
+    Type: AWS::IAM::Role
+    Condition: A2AEnabled
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-autonomous-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: AutonomousAgent
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']
+                Resource: '*'
+              - Effect: Allow
+                Action: sts:GetWebIdentityToken
+                Resource: '*'
+                Condition:
+                  ForAllValues:StringEquals:
+                    sts:IdentityTokenAudience: [api://AzureADTokenExchange]
+                  NumericLessThanEquals:
+                    sts:DurationSeconds: 300
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt AutonomousFailureQueue.Arn
+
+  AutonomousAgent:
+    Type: AWS::Lambda::Function
+    Condition: A2AEnabled
+    Properties:
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: autonomous.handler
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Role: !GetAtt AutonomousRole.Arn
+      Timeout: 240
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          ENTRA_TENANT_ID: !Ref EntraTenantId
+          BLUEPRINT_CLIENT_ID: !Ref Blueprint3ClientId
+          AGENT_IDENTITY_ID: !Ref Agent3IdentityId
+          A2A_RUNTIME_ARN: !GetAtt SpecialistRuntime.AgentRuntimeArn
+          A2A_SCOPE: !Sub 'api://${Blueprint2ClientId}/.default'
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          DEPLOY_ID: !Ref DeployId
+
+  AutonomousInvokeConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Condition: A2AEnabled
+    Properties:
+      FunctionName: !Ref AutonomousAgent
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 0
+      MaximumEventAgeInSeconds: 300
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt AutonomousFailureQueue.Arn
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Condition: A2AEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/default'
+      Policies:
+        - PolicyName: TriggerAutonomousAgent
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt AutonomousAgent.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt AutonomousFailureQueue.Arn
+
+  AutonomousSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: A2AEnabled
+    Properties:
+      State: !Ref AutonomousScheduleState
+      ScheduleExpression: rate(5 minutes)
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt AutonomousAgent.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"prompt":"Suggest one principle for reliable AI agent collaboration."}'
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 300
+          MaximumRetryAttempts: 0
+        DeadLetterConfig:
+          Arn: !GetAtt AutonomousFailureQueue.Arn
 
 Outputs:
 
@@ -344,3 +586,24 @@ Outputs:
   EchoApiUrl:
     Description: Echo API base URL (API Gateway HTTP API with Entra JWT authorizer)
     Value: !Sub 'https://${EchoHttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+
+  SpecialistRuntimeArn:
+    Condition: A2AEnabled
+    Value: !GetAtt SpecialistRuntime.AgentRuntimeArn
+  SpecialistRoleArn:
+    Condition: A2AEnabled
+    Description: Blueprint 2 FIC subject.
+    Value: !GetAtt SpecialistRole.Arn
+  AutonomousRoleArn:
+    Condition: A2AEnabled
+    Description: Blueprint 3 FIC subject.
+    Value: !GetAtt AutonomousRole.Arn
+  AutonomousFunctionName:
+    Condition: A2AEnabled
+    Value: !Ref AutonomousAgent
+  AutonomousScheduleName:
+    Condition: A2AEnabled
+    Value: !Ref AutonomousSchedule
+  AutonomousFailureQueueUrl:
+    Condition: A2AEnabled
+    Value: !Ref AutonomousFailureQueue
