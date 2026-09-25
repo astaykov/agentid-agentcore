@@ -18,7 +18,7 @@ All four placeholders in `spa/msal-config.js` must be replaced with real values:
 |---|---|
 | `SPA_CLIENT_ID` | Client ID of the **agentid-poc-spa** Entra app registration |
 | `TENANT_ID` | Entra tenant ID |
-| `BLUEPRINT_CLIENT_ID` | Client ID of the **Blueprint / AgentCore** Entra app registration (used to build the scope `api://<id>/access_as_user`) |
+| `BLUEPRINT_CLIENT_ID` | Client ID of **Blueprint 1 / AgentCore** (used to build `api://<id>/agent.invoke`) |
 | `AGENTCORE_ENDPOINT_URL` | The AgentCore invoke URL from CloudFormation Outputs |
 
 These are intentionally left as literals so they are never committed with real values.
